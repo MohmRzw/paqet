@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.4"
+SCRIPT_VERSION="1.3.5"
 APP_NAME="paqet"
 SERVICE_NAME="paqet"
 REPO="hanselime/paqet"
@@ -673,7 +673,7 @@ show_iran_test_info() {
 
 wizard_server() {
   local iface gw ip mac port key level
-  local port_default key_default mac_show
+  local port_default key_default mac_show mac_auto gw_effective
   local iface_d gw_d ip_d mac_d
 
   iface_d="$(auto_iface || true)"
@@ -727,10 +727,29 @@ wizard_server() {
     ip="$(prompt_default "Local IPv4 of this outside server (example: 10.0.0.10)" "${ip_d:-}")"
   done
 
+  if ! is_valid_mac "${mac:-}"; then
+    gw_effective="${gw:-$gw_d}"
+    if [[ -n "$iface" && -n "$gw_effective" ]]; then
+      mac_auto="$(auto_router_mac "$iface" "$gw_effective" || true)"
+      if is_valid_mac "$mac_auto"; then
+        mac="$mac_auto"
+        mac_d="$mac_auto"
+      fi
+    fi
+  fi
+
   if [[ -z "$mac" ]]; then
     mac="$(prompt_default "Router MAC (example: 12:34:56:78:9a:bc, do not use aa:bb:cc:dd:ee:ff)" "${mac_d:-}")"
   fi
   while ! is_valid_mac "$mac" || is_placeholder_value "$mac"; do
+    gw_effective="${gw:-$gw_d}"
+    if [[ -n "$iface" && -n "$gw_effective" ]]; then
+      mac_auto="$(auto_router_mac "$iface" "$gw_effective" || true)"
+      if is_valid_mac "$mac_auto"; then
+        mac="$mac_auto"
+        continue
+      fi
+    fi
     warn "Invalid/placeholder MAC. Enter a real MAC like 12:34:56:78:9a:bc."
     mac="$(prompt_default "Router MAC (example: 12:34:56:78:9a:bc, do not use aa:bb:cc:dd:ee:ff)" "${mac_d:-}")"
   done
@@ -782,7 +801,7 @@ wizard_client() {
   local forward_count first_forward_listen first_forward_target first_forward_proto
   local listen target proto idx
   local bulk_target_host bulk_listen_ip bulk_proto bulk_ports
-  local entry local_port remote_port listen_addr target_addr added_count
+  local entry local_port remote_port listen_addr target_addr added_count mac_auto gw_effective
   local outside_default key_default
   local -a bulk_entries=()
   local iface_d gw_d ip_d mac_d mac_show
@@ -839,10 +858,29 @@ wizard_client() {
     ip="$(prompt_default "Local IPv4 of this Iran server (example: 10.10.10.20)" "${ip_d:-}")"
   done
 
+  if ! is_valid_mac "${mac:-}"; then
+    gw_effective="${gw:-$gw_d}"
+    if [[ -n "$iface" && -n "$gw_effective" ]]; then
+      mac_auto="$(auto_router_mac "$iface" "$gw_effective" || true)"
+      if is_valid_mac "$mac_auto"; then
+        mac="$mac_auto"
+        mac_d="$mac_auto"
+      fi
+    fi
+  fi
+
   if [[ -z "$mac" ]]; then
     mac="$(prompt_default "Router MAC (example: 12:34:56:78:9a:bc, do not use aa:bb:cc:dd:ee:ff)" "${mac_d:-}")"
   fi
   while ! is_valid_mac "$mac" || is_placeholder_value "$mac"; do
+    gw_effective="${gw:-$gw_d}"
+    if [[ -n "$iface" && -n "$gw_effective" ]]; then
+      mac_auto="$(auto_router_mac "$iface" "$gw_effective" || true)"
+      if is_valid_mac "$mac_auto"; then
+        mac="$mac_auto"
+        continue
+      fi
+    fi
     warn "Invalid/placeholder MAC. Enter a real MAC like 12:34:56:78:9a:bc."
     mac="$(prompt_default "Router MAC (example: 12:34:56:78:9a:bc, do not use aa:bb:cc:dd:ee:ff)" "${mac_d:-}")"
   done
