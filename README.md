@@ -30,6 +30,9 @@ curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sud
 - `Server Address`
 - `Shared Key`
 
+نکته مهم: در زمان نصب، فقط گزینه‌هایی که با `[REQUIRED]` نمایش داده می‌شوند باید حتماً دستی وارد شوند.  
+بقیه موارد Default دارند و با Enter رد می‌شوند.
+
 ## ورودی‌ها را چطور وارد کنیم؟
 
 - مثال‌ها فقط نمونه‌اند.
