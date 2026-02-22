@@ -415,8 +415,8 @@ show_outside_next_info() {
   fi
   echo
   echo "===== Values you need on Iran server ====="
-  echo "Server Address: ${server_ip}:${port}"
-  echo "Shared Key: ${key}"
+  echo "[COPY TO IRAN] Server Address: ${server_ip}:${port}"
+  echo "[COPY TO IRAN] Shared Key: ${key}"
   echo "Next step on Iran server (no manual file editing needed):"
   echo "sudo ./paqet.sh setup-iran"
   echo
@@ -444,6 +444,7 @@ show_iran_test_info() {
 
 wizard_server() {
   local iface gw ip mac port key level
+  local port_default key_default
   local iface_d gw_d ip_d mac_d
 
   iface_d="$(auto_iface || true)"
@@ -455,6 +456,8 @@ wizard_server() {
 
   info "Configure outside server"
   show_sample_notice
+  echo "Defaults are enabled. Press Enter to accept defaults."
+  echo "Only values marked [REQUIRED] must be provided if auto-detect fails."
   echo "Press Enter to accept suggested values."
   echo "Detected values:"
   echo "  interface: ${iface_d:-not found}"
@@ -498,16 +501,24 @@ wizard_server() {
     mac="$(prompt_default "Router MAC (example: 12:34:56:78:9a:bc, do not use aa:bb:cc:dd:ee:ff)" "${mac_d:-}")"
   done
 
-  port="$(prompt_default "Tunnel port on outside server (example: 9999)" "9999")"
+  port_default="${PAQET_TUNNEL_PORT:-9999}"
+  if ! is_valid_port "$port_default"; then
+    port_default="9999"
+  fi
+  port="$(prompt_default "Tunnel port on outside server (example: 9999)" "$port_default")"
   while ! is_valid_port "$port"; do
     warn "Invalid port."
-    port="$(prompt_default "Tunnel port on outside server (example: 9999)" "9999")"
+    port="$(prompt_default "Tunnel port on outside server (example: 9999)" "$port_default")"
   done
 
-  key="$(prompt_default "Shared Key (example format: 64 hex chars, do not type shared-key)" "$(generate_secret)")"
+  key_default="${PAQET_SHARED_KEY:-}"
+  if [[ -z "$key_default" ]]; then
+    key_default="$(generate_secret)"
+  fi
+  key="$(prompt_default "Shared Key (example format: 64 hex chars, do not type shared-key)" "$key_default")"
   while [[ -z "$key" ]] || is_placeholder_value "$key"; do
     warn "Enter a real Shared Key. Do not use placeholder values."
-    key="$(prompt_default "Shared Key (example format: 64 hex chars, do not type shared-key)" "$(generate_secret)")"
+    key="$(prompt_default "Shared Key (example format: 64 hex chars, do not type shared-key)" "$key_default")"
   done
 
   level="$(prompt_default "Log level (example: info)" "info")"
@@ -527,6 +538,7 @@ wizard_client() {
   local listen target proto idx
   local bulk_target_host bulk_listen_ip bulk_proto bulk_ports
   local entry local_port remote_port listen_addr target_addr added_count
+  local outside_default key_default
   local -a bulk_entries=()
   local iface_d gw_d ip_d mac_d
 
@@ -539,6 +551,10 @@ wizard_client() {
 
   info "Configure Iran server (client side)"
   show_sample_notice
+  echo "Defaults are enabled. Press Enter to accept defaults."
+  echo "Required values for Iran setup:"
+  echo "  [REQUIRED] Outside server address (from outside setup output)"
+  echo "  [REQUIRED] Shared Key (from outside setup output)"
   echo "Press Enter to accept suggested values."
   echo "Detected values:"
   echo "  interface: ${iface_d:-not found}"
@@ -582,10 +598,11 @@ wizard_client() {
     mac="$(prompt_default "Router MAC (example: 12:34:56:78:9a:bc, do not use aa:bb:cc:dd:ee:ff)" "${mac_d:-}")"
   done
 
-  server="$(prompt_default "Outside server address (example: 203.0.113.10:9999, do not type x.x.x.x)" "")"
+  outside_default="${PAQET_OUTSIDE_ADDR:-}"
+  server="$(prompt_default "[REQUIRED] Outside server address (example: 203.0.113.10:9999, do not type x.x.x.x)" "$outside_default")"
   while [[ -z "$server" ]] || ! is_valid_port "$(extract_port "$server")" || is_placeholder_value "$server"; do
     warn "Invalid/placeholder outside server address. Example format: 203.0.113.10:9999"
-    server="$(prompt_default "Outside server address (example: 203.0.113.10:9999, do not type x.x.x.x)" "$server")"
+    server="$(prompt_default "[REQUIRED] Outside server address (example: 203.0.113.10:9999, do not type x.x.x.x)" "$server")"
   done
 
   use_socks="yes"
@@ -752,10 +769,11 @@ wizard_client() {
     pass=""
   fi
 
-  key="$(prompt_default "Shared Key (same as outside server, do not type shared-key)" "")"
+  key_default="${PAQET_SHARED_KEY:-}"
+  key="$(prompt_default "[REQUIRED] Shared Key (same as outside server, do not type shared-key)" "$key_default")"
   while [[ -z "$key" ]] || is_placeholder_value "$key"; do
     warn "Enter the real Shared Key from outside server."
-    key="$(prompt_default "Shared Key (required, do not type shared-key)" "")"
+    key="$(prompt_default "[REQUIRED] Shared Key (same as outside server, do not type shared-key)" "$key_default")"
   done
   level="$(prompt_default "Log level (example: info)" "info")"
 
