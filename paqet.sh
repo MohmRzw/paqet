@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.2"
+SCRIPT_VERSION="1.3.3"
 APP_NAME="paqet"
 SERVICE_NAME="paqet"
 REPO="hanselime/paqet"
@@ -307,7 +307,7 @@ install_dependencies() {
   local missing=()
   local pm
   local c
-  for c in curl tar ip iptables awk sed grep; do
+  for c in curl tar ip iptables awk sed grep ping; do
     exists "$c" || missing+=("$c")
   done
   [[ "${#missing[@]}" -eq 0 ]] && return 0
@@ -320,13 +320,13 @@ install_dependencies() {
     apt-get)
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
-      apt-get install -y curl tar iproute2 iptables ca-certificates
+      apt-get install -y curl tar iproute2 iptables ca-certificates iputils-ping
       ;;
-    dnf) dnf install -y curl tar iproute iptables ca-certificates ;;
-    yum) yum install -y curl tar iproute iptables ca-certificates ;;
-    pacman) pacman -Sy --noconfirm curl tar iproute2 iptables ca-certificates ;;
-    zypper) zypper --non-interactive in curl tar iproute2 iptables ca-certificates ;;
-    apk) apk add --no-cache curl tar iproute2 iptables ca-certificates ;;
+    dnf) dnf install -y curl tar iproute iptables ca-certificates iputils ;;
+    yum) yum install -y curl tar iproute iptables ca-certificates iputils ;;
+    pacman) pacman -Sy --noconfirm curl tar iproute2 iptables ca-certificates iputils ;;
+    zypper) zypper --non-interactive in curl tar iproute2 iptables ca-certificates iputils ;;
+    apk) apk add --no-cache curl tar iproute2 iptables ca-certificates iputils ;;
   esac
 }
 
@@ -485,8 +485,34 @@ auto_router_mac() {
   local iface="$1"
   local gw="$2"
   local mac
-  if exists ping; then ping -c 1 -W 1 "$gw" >/dev/null 2>&1 || true; fi
-  mac="$(ip neigh show "$gw" dev "$iface" 2>/dev/null | awk '{print $5; exit}' || true)"
+  mac="$(ip -o neigh show to "$gw" dev "$iface" 2>/dev/null | awk '/lladdr/ {print $5; exit}' || true)"
+  if is_valid_mac "$mac"; then
+    printf '%s' "$mac"
+    return
+  fi
+
+  if exists ping; then ping -n -c 1 -W 1 "$gw" >/dev/null 2>&1 || true; fi
+  if exists arping; then arping -c 1 -w 1 -I "$iface" "$gw" >/dev/null 2>&1 || true; fi
+  ip route get "$gw" >/dev/null 2>&1 || true
+
+  mac="$(ip -o neigh show to "$gw" dev "$iface" 2>/dev/null | awk '/lladdr/ {print $5; exit}' || true)"
+  if is_valid_mac "$mac"; then
+    printf '%s' "$mac"
+    return
+  fi
+
+  mac="$(ip -o neigh show dev "$iface" 2>/dev/null | awk -v g="$gw" '$1 == g && /lladdr/ {print $5; exit}' || true)"
+  if is_valid_mac "$mac"; then
+    printf '%s' "$mac"
+    return
+  fi
+
+  mac="$(ip -6 neigh show dev "$iface" 2>/dev/null | awk '/router/ && /lladdr/ {print $5; exit}' || true)"
+  if is_valid_mac "$mac"; then
+    printf '%s' "$mac"
+    return
+  fi
+
   printf '%s' "$mac"
 }
 
