@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 APP_NAME="paqet"
 SERVICE_NAME="paqet"
 REPO="hanselime/paqet"
@@ -525,6 +525,9 @@ wizard_client() {
   local use_socks forward_block
   local forward_count first_forward_listen first_forward_target first_forward_proto
   local listen target proto idx
+  local bulk_target_host bulk_listen_ip bulk_proto bulk_ports
+  local entry local_port remote_port listen_addr target_addr added_count
+  local -a bulk_entries=()
   local iface_d gw_d ip_d mac_d
 
   iface_d="$(auto_iface || true)"
@@ -612,47 +615,133 @@ wizard_client() {
   first_forward_target=""
   first_forward_proto=""
   if confirm_yes_default "Add direct app ports now (forward rules)?"; then
-    idx=1
-    while true; do
+    if confirm_yes_default "Use BULK input (comma-separated ports)?"; then
       echo
-      echo "Forward rule #${idx}"
-      echo "App -> local port on Iran server -> tunnel -> target"
-      listen="$(prompt_default "Local listen address (example: 127.0.0.1:$((7000 + idx)))" "127.0.0.1:$((7000 + idx))")"
-      while ! is_valid_port "$(extract_port "$listen")"; do
-        warn "Invalid local listen port."
-        listen="$(prompt_default "Local listen address (example: 127.0.0.1:$((7000 + idx)))" "$listen")"
+      echo "Bulk format options:"
+      echo "- Same local/target port list: 7001,7002,7003"
+      echo "- Local:Target mapping list:   7001:443,7002:8443"
+      echo "Do NOT type placeholders like example.com literally."
+
+      bulk_target_host="$(prompt_default "Bulk target host/domain (example: 93.184.216.34 or your-real-domain.com)" "")"
+      while [[ -z "$bulk_target_host" ]] || is_placeholder_value "$bulk_target_host"; do
+        warn "Enter a real host/domain for bulk target."
+        bulk_target_host="$(prompt_default "Bulk target host/domain (example: 93.184.216.34 or your-real-domain.com)" "$bulk_target_host")"
       done
 
-      target="$(prompt_default "Target via tunnel (example: 93.184.216.34:443 or your-domain.com:443, do not type example literally)" "")"
-      while [[ -z "$target" ]] || ! is_valid_port "$(extract_port "$target")" || is_placeholder_value "$target"; do
-        warn "Invalid/placeholder target. Use a real IP/domain:port."
-        target="$(prompt_default "Target via tunnel (example: 93.184.216.34:443 or your-domain.com:443, do not type example literally)" "$target")"
+      bulk_listen_ip="$(prompt_default "Bulk local listen IP (example: 127.0.0.1)" "127.0.0.1")"
+      while [[ -z "$bulk_listen_ip" ]] || is_placeholder_value "$bulk_listen_ip"; do
+        warn "Enter a real local listen IP."
+        bulk_listen_ip="$(prompt_default "Bulk local listen IP (example: 127.0.0.1)" "$bulk_listen_ip")"
       done
 
-      proto="$(prompt_default "Protocol (example: tcp)" "tcp")"
-      proto="${proto,,}"
-      while [[ "$proto" != "tcp" && "$proto" != "udp" ]]; do
+      bulk_proto="$(prompt_default "Bulk protocol for all rules (tcp/udp)" "tcp")"
+      bulk_proto="${bulk_proto,,}"
+      while [[ "$bulk_proto" != "tcp" && "$bulk_proto" != "udp" ]]; do
         warn "Protocol must be tcp or udp."
+        bulk_proto="$(prompt_default "Bulk protocol for all rules (tcp/udp)" "tcp")"
+        bulk_proto="${bulk_proto,,}"
+      done
+
+      while true; do
+        bulk_ports="$(prompt_default "Bulk ports list (example: 7001,7002 or 7001:443,7002:8443)" "")"
+        bulk_ports="${bulk_ports//[[:space:]]/}"
+        if [[ -z "$bulk_ports" ]]; then
+          warn "Port list is empty."
+          continue
+        fi
+
+        IFS=',' read -r -a bulk_entries <<< "$bulk_ports"
+        added_count=0
+
+        for entry in "${bulk_entries[@]}"; do
+          [[ -z "$entry" ]] && continue
+          if [[ "$entry" == *:* ]]; then
+            local_port="${entry%%:*}"
+            remote_port="${entry##*:}"
+          else
+            local_port="$entry"
+            remote_port="$entry"
+          fi
+
+          if ! is_valid_port "$local_port"; then
+            warn "Skip invalid local port token: $entry"
+            continue
+          fi
+          if ! is_valid_port "$remote_port"; then
+            warn "Skip invalid target port token: $entry"
+            continue
+          fi
+
+          listen_addr="${bulk_listen_ip}:${local_port}"
+          target_addr="${bulk_target_host}:${remote_port}"
+
+          if (( forward_count == 0 )); then
+            forward_block+="forward:"$'\n'
+            first_forward_listen="$listen_addr"
+            first_forward_target="$target_addr"
+            first_forward_proto="$bulk_proto"
+          fi
+
+          forward_block+="  - listen: \"$(yaml_escape "$listen_addr")\""$'\n'
+          forward_block+="    target: \"$(yaml_escape "$target_addr")\""$'\n'
+          forward_block+="    protocol: \"$(yaml_escape "$bulk_proto")\""$'\n'
+          forward_count=$((forward_count + 1))
+          added_count=$((added_count + 1))
+        done
+
+        if (( added_count == 0 )); then
+          warn "No valid ports parsed from list. Try again."
+          continue
+        fi
+
+        ok "Added ${added_count} forward rule(s) from bulk list."
+        if ! confirm_yes_default "Add another bulk list?"; then
+          break
+        fi
+      done
+    else
+      idx=1
+      while true; do
+        echo
+        echo "Forward rule #${idx}"
+        echo "App -> local port on Iran server -> tunnel -> target"
+        listen="$(prompt_default "Local listen address (example: 127.0.0.1:$((7000 + idx)))" "127.0.0.1:$((7000 + idx))")"
+        while ! is_valid_port "$(extract_port "$listen")"; do
+          warn "Invalid local listen port."
+          listen="$(prompt_default "Local listen address (example: 127.0.0.1:$((7000 + idx)))" "$listen")"
+        done
+
+        target="$(prompt_default "Target via tunnel (example: 93.184.216.34:443 or your-domain.com:443, do not type example literally)" "")"
+        while [[ -z "$target" ]] || ! is_valid_port "$(extract_port "$target")" || is_placeholder_value "$target"; do
+          warn "Invalid/placeholder target. Use a real IP/domain:port."
+          target="$(prompt_default "Target via tunnel (example: 93.184.216.34:443 or your-domain.com:443, do not type example literally)" "$target")"
+        done
+
         proto="$(prompt_default "Protocol (example: tcp)" "tcp")"
         proto="${proto,,}"
+        while [[ "$proto" != "tcp" && "$proto" != "udp" ]]; do
+          warn "Protocol must be tcp or udp."
+          proto="$(prompt_default "Protocol (example: tcp)" "tcp")"
+          proto="${proto,,}"
+        done
+
+        if (( forward_count == 0 )); then
+          forward_block+="forward:"$'\n'
+          first_forward_listen="$listen"
+          first_forward_target="$target"
+          first_forward_proto="$proto"
+        fi
+        forward_block+="  - listen: \"$(yaml_escape "$listen")\""$'\n'
+        forward_block+="    target: \"$(yaml_escape "$target")\""$'\n'
+        forward_block+="    protocol: \"$(yaml_escape "$proto")\""$'\n'
+        forward_count=$((forward_count + 1))
+        idx=$((idx + 1))
+
+        if ! confirm_yes_default "Add another forward rule?"; then
+          break
+        fi
       done
-
-      if (( forward_count == 0 )); then
-        forward_block+="forward:"$'\n'
-        first_forward_listen="$listen"
-        first_forward_target="$target"
-        first_forward_proto="$proto"
-      fi
-      forward_block+="  - listen: \"$(yaml_escape "$listen")\""$'\n'
-      forward_block+="    target: \"$(yaml_escape "$target")\""$'\n'
-      forward_block+="    protocol: \"$(yaml_escape "$proto")\""$'\n'
-      forward_count=$((forward_count + 1))
-      idx=$((idx + 1))
-
-      if ! confirm_yes_default "Add another forward rule?"; then
-        break
-      fi
-    done
+    fi
   fi
 
   if [[ "$use_socks" == "no" && "$forward_count" -eq 0 ]]; then
