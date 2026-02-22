@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.3.2"
 APP_NAME="paqet"
 SERVICE_NAME="paqet"
 REPO="hanselime/paqet"
@@ -12,6 +12,7 @@ ETC_DIR="/etc/paqet"
 CONFIG_PATH="${ETC_DIR}/config.yaml"
 ROLE_PATH="${ETC_DIR}/role"
 STATE_PATH="${ETC_DIR}/state.env"
+SOURCE_ENV_PATH="${ETC_DIR}/source.env"
 BACKUP_DIR="${ETC_DIR}/backup"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
@@ -333,10 +334,36 @@ fetch_latest_json() {
   curl -fsSL -H "Accept: application/vnd.github+json" -H "User-Agent: paqet-manager" "${API_URL}"
 }
 
+load_source_env() {
+  if [[ -f "$SOURCE_ENV_PATH" ]]; then
+    # shellcheck disable=SC1090
+    . "$SOURCE_ENV_PATH"
+  fi
+}
+
+configured_binary_url() {
+  local direct_url base_url repo branch
+  direct_url="${PAQET_BINARY_URL:-}"
+  if [[ -n "$direct_url" ]]; then
+    printf '%s' "$direct_url"
+    return 0
+  fi
+
+  base_url="${PAQET_BINARY_BASE_URL:-}"
+  repo="${PAQET_BOOTSTRAP_REPO:-}"
+  branch="${PAQET_BOOTSTRAP_BRANCH:-main}"
+  if [[ -z "$base_url" && -n "$repo" ]]; then
+    base_url="https://raw.githubusercontent.com/${repo}/${branch}"
+  fi
+
+  [[ -n "$base_url" ]] || return 1
+  printf '%s/paqet-linux-%s.tar.gz' "${base_url%/}" "$ARCH"
+}
+
 latest_tag() {
   local tag
   tag="$(fetch_latest_json | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)"
-  [[ -n "$tag" ]] || die "Could not read latest release tag."
+  [[ -n "$tag" ]] || return 1
   printf '%s' "$tag"
 }
 
@@ -347,7 +374,7 @@ download_url_for_arch() {
     | sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\)".*/\1/p' \
     | grep -E "/paqet-linux-${ARCH}(-[^/]*)?\\.tar\\.gz$" \
     | head -n1 || true)"
-  [[ -n "$url" ]] || die "No Linux asset found for arch ${ARCH}"
+  [[ -n "$url" ]] || return 1
   printf '%s' "$url"
 }
 
@@ -362,19 +389,66 @@ install_binary() {
   ensure_dirs
 
   local tag url current tmp archive exe
-  tag="$(latest_tag)"
-  url="$(download_url_for_arch)"
+  local custom_url official_tag official_url
   current="$(installed_version || true)"
+  load_source_env
+  custom_url="$(configured_binary_url || true)"
 
-  if [[ -n "$current" && "$current" == "$tag" ]]; then
-    ok "paqet ${current} is already installed."
+  if [[ -n "$custom_url" && -x "$BIN_PATH" && "${PAQET_FORCE_REINSTALL:-no}" != "yes" ]]; then
+    ok "paqet is already installed. Skipping re-install from custom source."
+    ok "Set PAQET_FORCE_REINSTALL=yes to force download/update."
     return 0
   fi
 
-  info "Downloading ${tag} for linux/${ARCH}"
+  if [[ -z "$custom_url" ]]; then
+    if ! official_tag="$(latest_tag)"; then
+      die "Could not read latest official release tag."
+    fi
+    if [[ -n "$current" && "$current" == "$official_tag" ]]; then
+      ok "paqet ${current} is already installed."
+      return 0
+    fi
+  fi
+
   tmp="$(mktemp -d)"
   archive="${tmp}/paqet.tar.gz"
-  curl -fL "$url" -o "$archive"
+
+  if [[ -n "$custom_url" ]]; then
+    info "Downloading custom binary for linux/${ARCH}"
+    if curl -fL "$custom_url" -o "$archive"; then
+      tag="${PAQET_BINARY_TAG:-custom}"
+      url="$custom_url"
+    else
+      warn "Custom binary download failed: ${custom_url}"
+      warn "Falling back to official release source."
+    fi
+  fi
+
+  if [[ -z "${url:-}" ]]; then
+    if [[ -z "${official_tag:-}" ]]; then
+      if ! official_tag="$(latest_tag)"; then
+        rm -rf "$tmp"
+        die "Could not read latest official release tag."
+      fi
+    fi
+    if ! official_url="$(download_url_for_arch)"; then
+      rm -rf "$tmp"
+      die "No Linux asset found for arch ${ARCH}."
+    fi
+    if [[ -n "$current" && "$current" == "$official_tag" ]]; then
+      rm -rf "$tmp"
+      ok "paqet ${current} is already installed."
+      return 0
+    fi
+    info "Downloading ${official_tag} for linux/${ARCH}"
+    if ! curl -fL "$official_url" -o "$archive"; then
+      rm -rf "$tmp"
+      die "Failed to download official asset: ${official_url}"
+    fi
+    tag="$official_tag"
+    url="$official_url"
+  fi
+
   tar -xzf "$archive" -C "$tmp"
 
   exe="$(find "$tmp" -maxdepth 2 -type f -name 'paqet_linux_*' | head -n1 || true)"
