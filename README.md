@@ -1,58 +1,78 @@
-# PAQET Easy Installer
+# اسکریپت نصب آسان Paqet (ایران ↔ خارج)
 
-Easy one-command bootstrap for Iran <-> Outside tunnel setup using `paqet.sh`.
+این ریپو **خودِ پروژه paqet نیست**.  
+ما فقط یک اسکریپت نصب/مدیریت نوشته‌ایم تا راه‌اندازی `paqet` ساده شود.
 
-## 1) Put this on GitHub
+## این پروژه دقیقاً چه کاری می‌کند؟
 
-Create a GitHub repo and upload these files:
+- با `install.sh` اسکریپت اصلی (`paqet.sh`) را روی سرور نصب می‌کند.
+- با `paqet.sh` مراحل نصب، کانفیگ، سرویس و اجرای تانل را ساده می‌کند.
+- باینری اصلی `paqet` را از ریلیز رسمی `hanselime/paqet` دانلود می‌کند.
 
-- `paqet.sh`
-- `install.sh`
-- `README.md`
-- `.gitignore`
+## نصب سریع (فقط دو دستور)
 
-Suggested branch: `main`
+> ترتیب درست: اول خارج، بعد ایران
 
-## 2) One-command install and run
-
-Use your repo path in `REPO` (example: `myuser/paqet`).
-
-### Outside server (run first)
+### 1) سرور خارج (اول)
 
 ```bash
-REPO="myuser/paqet"; sudo bash <(curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh") --repo "$REPO" outside
+curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- --repo MohmRzw/paqet outside
 ```
 
-### Iran server (run second)
+### 2) سرور ایران (دوم)
 
 ```bash
-REPO="myuser/paqet"; sudo bash <(curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh") --repo "$REPO" iran
+curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- --repo MohmRzw/paqet iran
 ```
 
-This flow is one-shot:
+بعد از اجرای دستور خارج، این دو مقدار را نگه دارید و در ایران وارد کنید:
 
-1. `outside` installs + configures + starts outside side
-2. `iran` installs + configures + starts Iran side
-3. During Iran setup, it asks for forward ports directly (no manual config edit required)
+- `Server Address`
+- `Shared Key`
 
-## 3) Important input note
+## ورودی‌ها را چطور وارد کنیم؟
 
-Examples shown by the script are placeholders.
-Do **not** type literals like:
+- مثال‌ها فقط نمونه‌اند.
+- مقادیر نمونه را عیناً وارد نکنید.
+- این‌ها نباید عیناً تایپ شوند:
+  - `x.x.x.x`
+  - `aa:bb:cc:dd:ee:ff`
+  - `example.com`
+  - `your-domain.com`
 
-- `x.x.x.x`
-- `aa:bb:cc:dd:ee:ff`
-- `example.com`
-- `your-domain.com`
+## پورت‌هایی که می‌خواهید تانل شوند
 
-Enter your real values.
+در مرحله `iran`، اسکریپت خودش می‌پرسد:
 
-## 4) Quick verify on Iran server
+- آیا `SOCKS5` می‌خواهید یا نه
+- آیا `forward` می‌خواهید یا نه
+- اگر `forward` بزنید، برای هر Rule می‌پرسد:
+  - `Local listen` (مثل `127.0.0.1:7001`)
+  - `Target` (مثل `1.2.3.4:443` یا `your-real-domain.com:443`)
+  - `Protocol` (`tcp` یا `udp`)
 
-If SOCKS is enabled (`127.0.0.1:1080`):
+یعنی دیگر نیازی نیست حتماً دستی فایل کانفیگ را ادیت کنید.
+
+## تست سریع بعد از نصب
+
+اگر SOCKS روشن باشد (مثلاً `127.0.0.1:1080`) روی ایران تست کنید:
 
 ```bash
 curl -v https://httpbin.org/ip --proxy socks5h://127.0.0.1:1080
 ```
 
-If IP returned is the outside server IP, tunnel is working.
+اگر IP خروجی، IP سرور خارج بود یعنی تانل برقرار است.
+
+## مدیریت بعد از نصب
+
+```bash
+sudo /usr/local/bin/paqet-manager menu
+```
+
+یا مستقیم:
+
+```bash
+sudo /usr/local/bin/paqet-manager status
+sudo /usr/local/bin/paqet-manager logs 100
+sudo /usr/local/bin/paqet-manager restart
+```
