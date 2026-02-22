@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="1.0.0"
+INSTALLER_VERSION="1.0.1"
 DEFAULT_BRANCH="main"
 DEFAULT_INSTALL_PATH="/usr/local/bin/paqet-manager"
 
@@ -38,6 +38,19 @@ require_root() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+run_installed_manager() {
+  local mode="$1"
+  if [[ -t 0 ]]; then
+    "$INSTALL_PATH" "$mode"
+    return
+  fi
+  if [[ -r /dev/tty ]]; then
+    "$INSTALL_PATH" "$mode" < /dev/tty
+    return
+  fi
+  die "No interactive TTY available for mode '${mode}'. Re-run with --no-run, then execute: $INSTALL_PATH $mode"
 }
 
 REPO="${GITHUB_REPO:-}"
@@ -96,6 +109,7 @@ done
 
 [[ -n "$REPO" ]] || die "Missing --repo <github_user/repo>"
 [[ "$REPO" != *"YOUR_"* ]] || die "Invalid repo value. Use real <user/repo>."
+[[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "Invalid --repo format. Expected: <github_user/repo>"
 
 case "$MODE" in
   outside|iran|menu) ;;
@@ -104,6 +118,8 @@ esac
 
 require_root
 require_cmd curl
+require_cmd install
+require_cmd mktemp
 
 SCRIPT_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/paqet.sh"
 TMP_FILE="$(mktemp)"
@@ -125,14 +141,14 @@ fi
 case "$MODE" in
   outside)
     log "Running full setup for outside server..."
-    "$INSTALL_PATH" setup-outside
+    run_installed_manager setup-outside
     ;;
   iran)
     log "Running full setup for Iran server..."
-    "$INSTALL_PATH" setup-iran
+    run_installed_manager setup-iran
     ;;
   menu)
     log "Opening interactive menu..."
-    "$INSTALL_PATH" menu
+    run_installed_manager menu
     ;;
 esac
