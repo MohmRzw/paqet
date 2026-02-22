@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="1.0.2"
+INSTALLER_VERSION="1.1.0"
+DEFAULT_REPO="MohmRzw/paqet"
 DEFAULT_BRANCH="main"
 DEFAULT_INSTALL_PATH="/usr/local/bin/paqet-manager"
 
@@ -15,20 +16,26 @@ usage() {
 PAQET bootstrap installer
 
 Usage:
+  install.sh [outside|iran|menu]
   install.sh --repo <github_user/repo> [outside|iran|menu]
-  install.sh --repo <github_user/repo> --mode outside
 
 Options:
-  --repo <value>       Required. Example: myuser/paqet
+  --repo <value>       Optional. Default: MohmRzw/paqet
   --branch <value>     Optional. Default: main
-  --mode <value>       outside | iran | menu (default: menu)
+  --mode <value>       outside | iran | menu
   --install-path <p>   Optional install path. Default: /usr/local/bin/paqet-manager
   --no-run             Install only, do not run setup after install
   -h, --help           Show help
 
 Examples:
-  REPO="myuser/paqet"; sudo bash <(curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh") --repo "$REPO" outside
-  REPO="myuser/paqet"; sudo bash <(curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh") --repo "$REPO" iran
+  # Easiest (asks mode: outside / iran / menu)
+  curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash
+
+  # Direct mode (outside)
+  curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- outside
+
+  # Direct mode (iran)
+  curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- iran
 EOF
 }
 
@@ -38,6 +45,50 @@ require_root() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+read_prompt_line() {
+  local prompt="$1"
+  local value=""
+  if [[ -t 0 ]]; then
+    read -r -p "$prompt" value || return 1
+    printf '%s' "$value"
+    return 0
+  fi
+  if [[ -r /dev/tty ]]; then
+    read -r -p "$prompt" value < /dev/tty || return 1
+    printf '%s' "$value"
+    return 0
+  fi
+  return 2
+}
+
+select_mode_if_needed() {
+  local ans=""
+  if [[ "$MODE_SET_BY_USER" == "yes" ]]; then
+    return 0
+  fi
+
+  cat <<'EOF'
+
+Choose install mode:
+1) outside
+2) iran
+3) menu
+EOF
+
+  if ans="$(read_prompt_line "Select [3]: ")"; then
+    :
+  else
+    ans=""
+  fi
+
+  case "${ans:-3}" in
+    1|outside) MODE="outside" ;;
+    2|iran) MODE="iran" ;;
+    3|menu|"") MODE="menu" ;;
+    *) MODE="menu" ;;
+  esac
 }
 
 run_installed_manager() {
@@ -53,9 +104,10 @@ run_installed_manager() {
   die "No interactive TTY available for mode '${mode}'. Re-run with --no-run, then execute: $INSTALL_PATH $mode"
 }
 
-REPO="${GITHUB_REPO:-}"
+REPO="${GITHUB_REPO:-$DEFAULT_REPO}"
 BRANCH="${GITHUB_BRANCH:-$DEFAULT_BRANCH}"
 MODE="menu"
+MODE_SET_BY_USER="no"
 INSTALL_PATH="${INSTALL_PATH:-$DEFAULT_INSTALL_PATH}"
 AUTO_RUN="yes"
 
@@ -74,6 +126,7 @@ while [[ $# -gt 0 ]]; do
     --mode)
       [[ $# -gt 1 ]] || die "--mode requires a value"
       MODE="$2"
+      MODE_SET_BY_USER="yes"
       shift 2
       ;;
     --install-path)
@@ -87,14 +140,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     outside|setup-outside)
       MODE="outside"
+      MODE_SET_BY_USER="yes"
       shift
       ;;
     iran|setup-iran)
       MODE="iran"
+      MODE_SET_BY_USER="yes"
       shift
       ;;
     menu)
       MODE="menu"
+      MODE_SET_BY_USER="yes"
       shift
       ;;
     -h|--help|help)
@@ -107,10 +163,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$REPO" ]] || die "Missing --repo <github_user/repo>"
 [[ "$REPO" != *"YOUR_"* ]] || die "Invalid repo value. Use real <user/repo>."
 [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "Invalid --repo format. Expected: <github_user/repo>"
 [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || die "Invalid --branch format."
+
+select_mode_if_needed
 
 case "$MODE" in
   outside|iran|menu) ;;
@@ -121,6 +178,12 @@ require_root
 require_cmd curl
 require_cmd install
 require_cmd mktemp
+
+if [[ "$REPO" == "$DEFAULT_REPO" ]]; then
+  log "Using default repo: ${REPO}"
+else
+  log "Using custom repo: ${REPO}"
+fi
 
 SCRIPT_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/paqet.sh"
 TMP_FILE="$(mktemp)"
