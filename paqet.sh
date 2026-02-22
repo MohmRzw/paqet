@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.3"
+SCRIPT_VERSION="1.3.4"
 APP_NAME="paqet"
 SERVICE_NAME="paqet"
 REPO="hanselime/paqet"
@@ -205,6 +205,19 @@ is_valid_port() {
 is_valid_mac() {
   local mac="$1"
   [[ "$mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]]
+}
+
+extract_lladdr_field() {
+  awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "lladdr" && (i + 1) <= NF) {
+          print $(i + 1)
+          exit
+        }
+      }
+    }
+  '
 }
 
 is_valid_ipv4() {
@@ -485,7 +498,7 @@ auto_router_mac() {
   local iface="$1"
   local gw="$2"
   local mac
-  mac="$(ip -o neigh show to "$gw" dev "$iface" 2>/dev/null | awk '/lladdr/ {print $5; exit}' || true)"
+  mac="$(ip -o neigh show to "$gw" dev "$iface" 2>/dev/null | extract_lladdr_field || true)"
   if is_valid_mac "$mac"; then
     printf '%s' "$mac"
     return
@@ -495,19 +508,19 @@ auto_router_mac() {
   if exists arping; then arping -c 1 -w 1 -I "$iface" "$gw" >/dev/null 2>&1 || true; fi
   ip route get "$gw" >/dev/null 2>&1 || true
 
-  mac="$(ip -o neigh show to "$gw" dev "$iface" 2>/dev/null | awk '/lladdr/ {print $5; exit}' || true)"
+  mac="$(ip -o neigh show to "$gw" dev "$iface" 2>/dev/null | extract_lladdr_field || true)"
   if is_valid_mac "$mac"; then
     printf '%s' "$mac"
     return
   fi
 
-  mac="$(ip -o neigh show dev "$iface" 2>/dev/null | awk -v g="$gw" '$1 == g && /lladdr/ {print $5; exit}' || true)"
+  mac="$(ip -o neigh show dev "$iface" 2>/dev/null | awk -v g="$gw" '$1 == g' | extract_lladdr_field || true)"
   if is_valid_mac "$mac"; then
     printf '%s' "$mac"
     return
   fi
 
-  mac="$(ip -6 neigh show dev "$iface" 2>/dev/null | awk '/router/ && /lladdr/ {print $5; exit}' || true)"
+  mac="$(ip -6 neigh show dev "$iface" 2>/dev/null | awk '/router/' | extract_lladdr_field || true)"
   if is_valid_mac "$mac"; then
     printf '%s' "$mac"
     return
@@ -660,7 +673,7 @@ show_iran_test_info() {
 
 wizard_server() {
   local iface gw ip mac port key level
-  local port_default key_default
+  local port_default key_default mac_show
   local iface_d gw_d ip_d mac_d
 
   iface_d="$(auto_iface || true)"
@@ -669,6 +682,10 @@ wizard_server() {
   mac_d=""
   [[ -n "$iface_d" ]] && ip_d="$(auto_ipv4 "$iface_d" || true)"
   [[ -n "$iface_d" && -n "$gw_d" ]] && mac_d="$(auto_router_mac "$iface_d" "$gw_d" || true)"
+  if ! is_valid_mac "${mac_d:-}"; then
+    mac_d=""
+  fi
+  mac_show="${mac_d:-not found}"
 
   info "Configure outside server"
   show_sample_notice
@@ -680,7 +697,7 @@ wizard_server() {
   echo "  interface: ${iface_d:-not found}"
   echo "  local ip:  ${ip_d:-not found}"
   echo "  gateway:   ${gw_d:-not found}"
-  echo "  gw mac:    ${mac_d:-not found}"
+  echo "  gw mac:    ${mac_show}"
 
   if confirm_yes_default "Use detected values?"; then
     iface="${iface_d:-eth0}"
@@ -768,7 +785,7 @@ wizard_client() {
   local entry local_port remote_port listen_addr target_addr added_count
   local outside_default key_default
   local -a bulk_entries=()
-  local iface_d gw_d ip_d mac_d
+  local iface_d gw_d ip_d mac_d mac_show
 
   iface_d="$(auto_iface || true)"
   gw_d="$(auto_gateway || true)"
@@ -776,6 +793,10 @@ wizard_client() {
   mac_d=""
   [[ -n "$iface_d" ]] && ip_d="$(auto_ipv4 "$iface_d" || true)"
   [[ -n "$iface_d" && -n "$gw_d" ]] && mac_d="$(auto_router_mac "$iface_d" "$gw_d" || true)"
+  if ! is_valid_mac "${mac_d:-}"; then
+    mac_d=""
+  fi
+  mac_show="${mac_d:-not found}"
 
   info "Configure Iran server (client side)"
   show_sample_notice
@@ -788,7 +809,7 @@ wizard_client() {
   echo "  interface: ${iface_d:-not found}"
   echo "  local ip:  ${ip_d:-not found}"
   echo "  gateway:   ${gw_d:-not found}"
-  echo "  gw mac:    ${mac_d:-not found}"
+  echo "  gw mac:    ${mac_show}"
 
   if confirm_yes_default "Use detected values?"; then
     iface="${iface_d:-eth0}"
