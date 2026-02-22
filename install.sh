@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="1.0.1"
+INSTALLER_VERSION="1.0.2"
 DEFAULT_BRANCH="main"
 DEFAULT_INSTALL_PATH="/usr/local/bin/paqet-manager"
 
@@ -110,6 +110,7 @@ done
 [[ -n "$REPO" ]] || die "Missing --repo <github_user/repo>"
 [[ "$REPO" != *"YOUR_"* ]] || die "Invalid repo value. Use real <user/repo>."
 [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "Invalid --repo format. Expected: <github_user/repo>"
+[[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || die "Invalid --branch format."
 
 case "$MODE" in
   outside|iran|menu) ;;
@@ -131,6 +132,14 @@ curl -fsSL "$SCRIPT_URL" -o "$TMP_FILE" || die "Failed to download paqet.sh from
 mkdir -p "$(dirname "$INSTALL_PATH")"
 install -m 0755 "$TMP_FILE" "$INSTALL_PATH"
 ok "Installed: $INSTALL_PATH"
+
+mkdir -p /etc/paqet
+cat > /etc/paqet/source.env <<EOF
+PAQET_BOOTSTRAP_REPO='${REPO}'
+PAQET_BOOTSTRAP_BRANCH='${BRANCH}'
+PAQET_BINARY_BASE_URL='https://raw.githubusercontent.com/${REPO}/${BRANCH}'
+EOF
+ok "Saved binary source: /etc/paqet/source.env"
 
 if [[ "$AUTO_RUN" == "no" ]]; then
   log "Install only mode completed."
