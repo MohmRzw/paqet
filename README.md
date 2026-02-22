@@ -3,15 +3,18 @@
 این ریپو **خودِ پروژه paqet نیست**.  
 ما فقط یک اسکریپت نصب/مدیریت نوشته‌ایم تا راه‌اندازی `paqet` ساده‌تر شود.
 
-هسته و باینری اصلی همچنان از پروژه رسمی `hanselime/paqet` دریافت می‌شود.
+این اسکریپت اول تلاش می‌کند باینری را از همین ریپو با فایل `paqet-linux-<arch>.tar.gz` بگیرد.
+اگر فایل در ریپو موجود نباشد، به صورت خودکار از ریلیز رسمی `hanselime/paqet` استفاده می‌کند.
 
 ## روش پیشنهادی: اول با منو (هم برای خارج، هم برای ایران)
 
 اگر می‌خواهید مرحله‌به‌مرحله جلو بروید، اول منو را بالا بیاورید:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- --repo MohmRzw/paqet menu
+curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash
 ```
+
+این دستور بدون `--repo` کار می‌کند و به صورت خودکار از ریپوی پیش‌فرض همین پروژه استفاده می‌کند.
 
 در منو این مسیر را بزنید:
 
@@ -28,13 +31,13 @@ curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sud
 ### 1) سرور خارج (اول)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- --repo MohmRzw/paqet outside
+curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- outside
 ```
 
 ### 2) سرور ایران (دوم)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- --repo MohmRzw/paqet iran
+curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- iran
 ```
 
 بعد از نصب خارج، این دو مقدار را نگه دارید و در ایران وارد کنید:
