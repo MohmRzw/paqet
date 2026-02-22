@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 APP_NAME="paqet"
 SERVICE_NAME="paqet"
 REPO="hanselime/paqet"
@@ -86,15 +86,48 @@ ensure_dirs() {
   mkdir -p "${ETC_DIR}" "${BACKUP_DIR}"
 }
 
+read_prompt_line() {
+  local prompt="$1"
+  local value=""
+  if [[ -t 0 ]]; then
+    read -r -p "$prompt" value || return 1
+    printf '%s' "$value"
+    return 0
+  fi
+  if [[ -r /dev/tty ]]; then
+    read -r -p "$prompt" value < /dev/tty || return 1
+    printf '%s' "$value"
+    return 0
+  fi
+  return 2
+}
+
 prompt_default() {
   local msg="$1"
   local default="${2-}"
   local value=""
+  local rc=0
   if [[ -n "$default" ]]; then
-    read -r -p "${msg} [${default}]: " value || true
+    if value="$(read_prompt_line "${msg} [${default}]: ")"; then
+      :
+    else
+      rc=$?
+      if [[ "$rc" -eq 2 ]]; then
+        die "Interactive input is required but no TTY is available."
+      fi
+      value=""
+    fi
     printf '%s' "${value:-$default}"
   else
-    read -r -p "${msg}: " value || true
+    if value="$(read_prompt_line "${msg}: ")"; then
+      :
+    else
+      rc=$?
+      if [[ "$rc" -eq 2 ]]; then
+        die "Interactive input is required but no TTY is available."
+      fi
+      die "Input required for: ${msg}"
+    fi
     printf '%s' "$value"
   fi
 }
@@ -102,7 +135,16 @@ prompt_default() {
 confirm() {
   local msg="$1"
   local ans=""
-  read -r -p "${msg} [y/N]: " ans || true
+  local rc=0
+  if ans="$(read_prompt_line "${msg} [y/N]: ")"; then
+    :
+  else
+    rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+      die "Interactive input is required but no TTY is available."
+    fi
+    ans=""
+  fi
   ans="${ans,,}"
   [[ "$ans" == "y" || "$ans" == "yes" ]]
 }
@@ -110,7 +152,16 @@ confirm() {
 confirm_yes_default() {
   local msg="$1"
   local ans=""
-  read -r -p "${msg} [Y/n]: " ans || true
+  local rc=0
+  if ans="$(read_prompt_line "${msg} [Y/n]: ")"; then
+    :
+  else
+    rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+      die "Interactive input is required but no TTY is available."
+    fi
+    ans=""
+  fi
   ans="${ans,,}"
   [[ -z "$ans" || "$ans" == "y" || "$ans" == "yes" ]]
 }
@@ -155,9 +206,72 @@ is_valid_mac() {
   [[ "$mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]]
 }
 
+is_valid_ipv4() {
+  local ip="$1"
+  local o1 o2 o3 o4 octet
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r o1 o2 o3 o4 <<< "$ip"
+  for octet in "$o1" "$o2" "$o3" "$o4"; do
+    (( octet >= 0 && octet <= 255 )) || return 1
+  done
+}
+
 extract_port() {
   local addr="$1"
   printf '%s' "${addr##*:}"
+}
+
+detect_ssh_port() {
+  local p=""
+  p="${PAQET_SSH_PORT:-}"
+  if is_valid_port "$p"; then
+    printf '%s' "$p"
+    return 0
+  fi
+  if [[ -f /etc/ssh/sshd_config ]]; then
+    p="$(awk '/^[[:space:]]*Port[[:space:]]+[0-9]+([[:space:]]|$)/ {print $2; exit}' /etc/ssh/sshd_config || true)"
+    if is_valid_port "$p"; then
+      printf '%s' "$p"
+      return 0
+    fi
+  fi
+  printf '22'
+}
+
+tunnel_port_safety_reason() {
+  local p="$1"
+  local ssh_port
+  ssh_port="$(detect_ssh_port || true)"
+  if [[ -n "$ssh_port" && "$p" == "$ssh_port" ]]; then
+    printf 'Tunnel port %s matches SSH port %s. This can break SSH access when firewall rules are applied.' "$p" "$ssh_port"
+    return 0
+  fi
+  case "$p" in
+    22)
+      printf 'Tunnel port %s is SSH. This can lock you out from remote access.' "$p"
+      return 0
+      ;;
+    80|443)
+      printf 'Tunnel port %s is a common web port. Firewall rules can break normal web traffic on this server.' "$p"
+      return 0
+      ;;
+    53)
+      printf 'Tunnel port %s is DNS. This can break DNS traffic on this server.' "$p"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+assert_safe_tunnel_port() {
+  local p="$1"
+  local reason=""
+  if [[ "${PAQET_ALLOW_RISKY_PORT:-no}" == "yes" ]]; then
+    return 0
+  fi
+  if reason="$(tunnel_port_safety_reason "$p")"; then
+    die "${reason} Use a high non-standard port (example: 9999 or 18080), or set PAQET_ALLOW_RISKY_PORT=yes to override."
+  fi
 }
 
 detect_arch() {
@@ -231,7 +345,7 @@ download_url_for_arch() {
   json="$(fetch_latest_json)"
   url="$(printf '%s\n' "$json" \
     | sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\)".*/\1/p' \
-    | grep -E "/paqet-linux-${ARCH}-.*\\.tar\\.gz$" \
+    | grep -E "/paqet-linux-${ARCH}(-[^/]*)?\\.tar\\.gz$" \
     | head -n1 || true)"
   [[ -n "$url" ]] || die "No Linux asset found for arch ${ARCH}"
   printf '%s' "$url"
@@ -371,8 +485,10 @@ write_client_config() {
     if [[ "$use_socks" == "yes" ]]; then
       echo "socks5:"
       echo "  - listen: \"$(yaml_escape "$socks_addr")\""
-      echo "    username: \"$(yaml_escape "$user")\""
-      echo "    password: \"$(yaml_escape "$pass")\""
+      if [[ -n "$user" || -n "$pass" ]]; then
+        echo "    username: \"$(yaml_escape "$user")\""
+        echo "    password: \"$(yaml_escape "$pass")\""
+      fi
       echo
     fi
     if [[ -n "$forward_block" ]]; then
@@ -459,6 +575,7 @@ wizard_server() {
   echo "Defaults are enabled. Press Enter to accept defaults."
   echo "Only values marked [REQUIRED] must be provided if auto-detect fails."
   echo "Press Enter to accept suggested values."
+  echo "Avoid tunnel ports 22/80/443/53 on outside server."
   echo "Detected values:"
   echo "  interface: ${iface_d:-not found}"
   echo "  local ip:  ${ip_d:-not found}"
@@ -475,8 +592,8 @@ wizard_server() {
 
     gw="$(prompt_default "Gateway IPv4 (optional, example: 192.168.1.1)" "${gw_d:-}")"
     ip="$(prompt_default "Local IPv4 of this outside server (example: 10.0.0.10)" "${ip_d:-}")"
-    while [[ -z "$ip" ]] || is_placeholder_value "$ip"; do
-      warn "Enter a real IPv4. Do not use placeholder values."
+    while [[ -z "$ip" ]] || ! is_valid_ipv4 "$ip" || is_placeholder_value "$ip"; do
+      warn "Enter a real IPv4 (example: 10.0.0.10). Do not use placeholder values."
       ip="$(prompt_default "Local IPv4 of this outside server (example: 10.0.0.10)" "${ip_d:-}")"
     done
     if [[ -n "$gw" ]]; then
@@ -488,8 +605,8 @@ wizard_server() {
   if [[ -z "$ip" ]] || is_placeholder_value "$ip"; then
     ip="$(prompt_default "Local IPv4 of this outside server (example: 10.0.0.10)" "${ip_d:-}")"
   fi
-  while [[ -z "$ip" ]] || is_placeholder_value "$ip"; do
-    warn "Enter a real IPv4. Do not use placeholder values."
+  while [[ -z "$ip" ]] || ! is_valid_ipv4 "$ip" || is_placeholder_value "$ip"; do
+    warn "Enter a real IPv4 (example: 10.0.0.10). Do not use placeholder values."
     ip="$(prompt_default "Local IPv4 of this outside server (example: 10.0.0.10)" "${ip_d:-}")"
   done
 
@@ -505,10 +622,21 @@ wizard_server() {
   if ! is_valid_port "$port_default"; then
     port_default="9999"
   fi
-  port="$(prompt_default "Tunnel port on outside server (example: 9999)" "$port_default")"
-  while ! is_valid_port "$port"; do
-    warn "Invalid port."
+  while true; do
     port="$(prompt_default "Tunnel port on outside server (example: 9999)" "$port_default")"
+    if ! is_valid_port "$port"; then
+      warn "Invalid port."
+      continue
+    fi
+    if [[ "${PAQET_ALLOW_RISKY_PORT:-no}" != "yes" ]]; then
+      local safety_reason=""
+      if safety_reason="$(tunnel_port_safety_reason "$port")"; then
+        warn "$safety_reason"
+        warn "Choose a high non-standard port (example: 9999 or 18080), or set PAQET_ALLOW_RISKY_PORT=yes to override."
+        continue
+      fi
+    fi
+    break
   done
 
   key_default="${PAQET_SHARED_KEY:-}"
@@ -572,8 +700,8 @@ wizard_client() {
 
     gw="$(prompt_default "Gateway IPv4 (optional, example: 192.168.1.1)" "${gw_d:-}")"
     ip="$(prompt_default "Local IPv4 of this Iran server (example: 10.10.10.20)" "${ip_d:-}")"
-    while [[ -z "$ip" ]] || is_placeholder_value "$ip"; do
-      warn "Enter a real IPv4. Do not use placeholder values."
+    while [[ -z "$ip" ]] || ! is_valid_ipv4 "$ip" || is_placeholder_value "$ip"; do
+      warn "Enter a real IPv4 (example: 10.10.10.20). Do not use placeholder values."
       ip="$(prompt_default "Local IPv4 of this Iran server (example: 10.10.10.20)" "${ip_d:-}")"
     done
     if [[ -n "$gw" ]]; then
@@ -585,8 +713,8 @@ wizard_client() {
   if [[ -z "$ip" ]] || is_placeholder_value "$ip"; then
     ip="$(prompt_default "Local IPv4 of this Iran server (example: 10.10.10.20)" "${ip_d:-}")"
   fi
-  while [[ -z "$ip" ]] || is_placeholder_value "$ip"; do
-    warn "Enter a real IPv4. Do not use placeholder values."
+  while [[ -z "$ip" ]] || ! is_valid_ipv4 "$ip" || is_placeholder_value "$ip"; do
+    warn "Enter a real IPv4 (example: 10.10.10.20). Do not use placeholder values."
     ip="$(prompt_default "Local IPv4 of this Iran server (example: 10.10.10.20)" "${ip_d:-}")"
   done
 
@@ -614,7 +742,15 @@ wizard_client() {
     done
     if confirm "Enable username/password for local SOCKS5?"; then
       user="$(prompt_default "Username (example: myuser)" "")"
+      while [[ -z "$user" ]]; do
+        warn "Username cannot be empty when auth is enabled."
+        user="$(prompt_default "Username (example: myuser)" "")"
+      done
       pass="$(prompt_default "Password (example: mypass123)" "")"
+      while [[ -z "$pass" ]]; do
+        warn "Password cannot be empty when auth is enabled."
+        pass="$(prompt_default "Password (example: mypass123)" "")"
+      done
     else
       user=""
       pass=""
@@ -901,6 +1037,7 @@ iptables_del() {
 firewall_apply() {
   local port
   port="$(resolve_server_port "${1:-}")"
+  assert_safe_tunnel_port "$port"
   info "Applying required outside-server network rules for TCP/${port}"
   iptables_add raw PREROUTING -p tcp --dport "$port" -j NOTRACK
   iptables_add raw OUTPUT -p tcp --sport "$port" -j NOTRACK
