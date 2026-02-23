@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.5"
+SCRIPT_VERSION="1.3.6"
 APP_NAME="paqet"
 SERVICE_NAME="paqet"
 REPO="hanselime/paqet"
@@ -230,9 +230,54 @@ is_valid_ipv4() {
   done
 }
 
+is_valid_hostname() {
+  local h="$1"
+  [[ "$h" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]]
+}
+
+is_valid_host() {
+  local h="$1"
+  [[ -n "$h" ]] || return 1
+  [[ "$h" == "localhost" ]] && return 0
+  is_valid_ipv4 "$h" && return 0
+  is_valid_hostname "$h"
+}
+
+is_valid_bind_host() {
+  local h="$1"
+  [[ -n "$h" ]] || return 1
+  [[ "$h" == "localhost" || "$h" == "0.0.0.0" ]] && return 0
+  is_valid_ipv4 "$h"
+}
+
 extract_port() {
   local addr="$1"
   printf '%s' "${addr##*:}"
+}
+
+extract_host() {
+  local addr="$1"
+  printf '%s' "${addr%:*}"
+}
+
+is_valid_hostport() {
+  local addr="$1"
+  local host port
+  [[ "$addr" =~ ^[^[:space:]]+:[0-9]+$ ]] || return 1
+  host="$(extract_host "$addr")"
+  port="$(extract_port "$addr")"
+  is_valid_port "$port" || return 1
+  is_valid_host "$host"
+}
+
+is_valid_bind_hostport() {
+  local addr="$1"
+  local host port
+  [[ "$addr" =~ ^[^[:space:]]+:[0-9]+$ ]] || return 1
+  host="$(extract_host "$addr")"
+  port="$(extract_port "$addr")"
+  is_valid_port "$port" || return 1
+  is_valid_bind_host "$host"
 }
 
 detect_ssh_port() {
@@ -802,6 +847,8 @@ wizard_client() {
   local listen target proto idx
   local bulk_target_host bulk_listen_ip bulk_proto bulk_ports
   local entry local_port remote_port listen_addr target_addr added_count mac_auto gw_effective
+  local socks_expose_default forward_bind_default listen_default seen_listens
+  local socks_host first_listen_host
   local outside_default key_default
   local -a bulk_entries=()
   local iface_d gw_d ip_d mac_d mac_show
@@ -887,17 +934,22 @@ wizard_client() {
 
   outside_default="${PAQET_OUTSIDE_ADDR:-}"
   server="$(prompt_default "[REQUIRED] Outside server address (example: 203.0.113.10:9999, do not type x.x.x.x)" "$outside_default")"
-  while [[ -z "$server" ]] || ! is_valid_port "$(extract_port "$server")" || is_placeholder_value "$server"; do
+  while [[ -z "$server" ]] || ! is_valid_hostport "$server" || is_placeholder_value "$server"; do
     warn "Invalid/placeholder outside server address. Example format: 203.0.113.10:9999"
     server="$(prompt_default "[REQUIRED] Outside server address (example: 203.0.113.10:9999, do not type x.x.x.x)" "$server")"
   done
 
   use_socks="yes"
   if confirm_yes_default "Enable local SOCKS5 for apps?"; then
-    socks="$(prompt_default "Local SOCKS5 address (example: 127.0.0.1:1080)" "127.0.0.1:1080")"
-    while ! is_valid_port "$(extract_port "$socks")"; do
-      warn "Invalid local SOCKS5 port."
-      socks="$(prompt_default "Local SOCKS5 address (example: 127.0.0.1:1080)" "$socks")"
+    if confirm_yes_default "Expose SOCKS5 on all interfaces (0.0.0.0)?"; then
+      socks_expose_default="0.0.0.0:1080"
+    else
+      socks_expose_default="127.0.0.1:1080"
+    fi
+      socks="$(prompt_default "Local SOCKS5 address (example: ${socks_expose_default})" "$socks_expose_default")"
+    while ! is_valid_bind_hostport "$socks" || is_placeholder_value "$socks"; do
+      warn "Invalid local SOCKS5 address. Use bind_ip:port (example: 127.0.0.1:1080 or 0.0.0.0:1080)."
+      socks="$(prompt_default "Local SOCKS5 address (example: ${socks_expose_default})" "$socks")"
     done
     if confirm "Enable username/password for local SOCKS5?"; then
       user="$(prompt_default "Username (example: myuser)" "")"
@@ -926,7 +978,14 @@ wizard_client() {
   first_forward_listen=""
   first_forward_target=""
   first_forward_proto=""
+  seen_listens=","
   if confirm_yes_default "Add direct app ports now (forward rules)?"; then
+    if confirm_yes_default "Expose forward ports on all interfaces (0.0.0.0)?"; then
+      forward_bind_default="0.0.0.0"
+    else
+      forward_bind_default="127.0.0.1"
+    fi
+
     if confirm_yes_default "Use BULK input (comma-separated ports)?"; then
       echo
       echo "Bulk format options:"
@@ -935,15 +994,15 @@ wizard_client() {
       echo "Do NOT type placeholders like example.com literally."
 
       bulk_target_host="$(prompt_default "Bulk target host/domain (example: 93.184.216.34 or your-real-domain.com)" "")"
-      while [[ -z "$bulk_target_host" ]] || is_placeholder_value "$bulk_target_host"; do
+      while [[ -z "$bulk_target_host" ]] || is_placeholder_value "$bulk_target_host" || ! is_valid_host "$bulk_target_host"; do
         warn "Enter a real host/domain for bulk target."
         bulk_target_host="$(prompt_default "Bulk target host/domain (example: 93.184.216.34 or your-real-domain.com)" "$bulk_target_host")"
       done
 
-      bulk_listen_ip="$(prompt_default "Bulk local listen IP (example: 127.0.0.1)" "127.0.0.1")"
-      while [[ -z "$bulk_listen_ip" ]] || is_placeholder_value "$bulk_listen_ip"; do
+      bulk_listen_ip="$(prompt_default "Bulk local listen IP (example: ${forward_bind_default})" "$forward_bind_default")"
+      while [[ -z "$bulk_listen_ip" ]] || is_placeholder_value "$bulk_listen_ip" || ! is_valid_bind_host "$bulk_listen_ip"; do
         warn "Enter a real local listen IP."
-        bulk_listen_ip="$(prompt_default "Bulk local listen IP (example: 127.0.0.1)" "$bulk_listen_ip")"
+        bulk_listen_ip="$(prompt_default "Bulk local listen IP (example: ${forward_bind_default})" "$bulk_listen_ip")"
       done
 
       bulk_proto="$(prompt_default "Bulk protocol for all rules (tcp/udp)" "tcp")"
@@ -986,6 +1045,10 @@ wizard_client() {
 
           listen_addr="${bulk_listen_ip}:${local_port}"
           target_addr="${bulk_target_host}:${remote_port}"
+          if [[ "$seen_listens" == *",${listen_addr},"* ]]; then
+            warn "Skip duplicate local listen address: ${listen_addr}"
+            continue
+          fi
 
           if (( forward_count == 0 )); then
             forward_block+="forward:"$'\n'
@@ -997,6 +1060,7 @@ wizard_client() {
           forward_block+="  - listen: \"$(yaml_escape "$listen_addr")\""$'\n'
           forward_block+="    target: \"$(yaml_escape "$target_addr")\""$'\n'
           forward_block+="    protocol: \"$(yaml_escape "$bulk_proto")\""$'\n'
+          seen_listens+="${listen_addr},"
           forward_count=$((forward_count + 1))
           added_count=$((added_count + 1))
         done
@@ -1007,7 +1071,7 @@ wizard_client() {
         fi
 
         ok "Added ${added_count} forward rule(s) from bulk list."
-        if ! confirm_yes_default "Add another bulk list?"; then
+        if ! confirm "Add another bulk list?"; then
           break
         fi
       done
@@ -1017,14 +1081,19 @@ wizard_client() {
         echo
         echo "Forward rule #${idx}"
         echo "App -> local port on Iran server -> tunnel -> target"
-        listen="$(prompt_default "Local listen address (example: 127.0.0.1:$((7000 + idx)))" "127.0.0.1:$((7000 + idx))")"
-        while ! is_valid_port "$(extract_port "$listen")"; do
-          warn "Invalid local listen port."
-          listen="$(prompt_default "Local listen address (example: 127.0.0.1:$((7000 + idx)))" "$listen")"
+        listen_default="${forward_bind_default}:$((7000 + idx))"
+        listen="$(prompt_default "Local listen address (example: ${listen_default})" "$listen_default")"
+        while ! is_valid_bind_hostport "$listen" || is_placeholder_value "$listen"; do
+          warn "Invalid local listen address. Use bind_ip:port (example: ${listen_default})."
+          listen="$(prompt_default "Local listen address (example: ${listen_default})" "$listen")"
         done
+        if [[ "$seen_listens" == *",${listen},"* ]]; then
+          warn "Local listen ${listen} is already used. Choose another one."
+          continue
+        fi
 
         target="$(prompt_default "Target via tunnel (example: 93.184.216.34:443 or your-domain.com:443, do not type example literally)" "")"
-        while [[ -z "$target" ]] || ! is_valid_port "$(extract_port "$target")" || is_placeholder_value "$target"; do
+        while [[ -z "$target" ]] || ! is_valid_hostport "$target" || is_placeholder_value "$target"; do
           warn "Invalid/placeholder target. Use a real IP/domain:port."
           target="$(prompt_default "Target via tunnel (example: 93.184.216.34:443 or your-domain.com:443, do not type example literally)" "$target")"
         done
@@ -1046,10 +1115,11 @@ wizard_client() {
         forward_block+="  - listen: \"$(yaml_escape "$listen")\""$'\n'
         forward_block+="    target: \"$(yaml_escape "$target")\""$'\n'
         forward_block+="    protocol: \"$(yaml_escape "$proto")\""$'\n'
+        seen_listens+="${listen},"
         forward_count=$((forward_count + 1))
         idx=$((idx + 1))
 
-        if ! confirm_yes_default "Add another forward rule?"; then
+        if ! confirm "Add another forward rule?"; then
           break
         fi
       done
@@ -1077,6 +1147,21 @@ wizard_client() {
     return 1
   fi
   write_client_config "$iface" "$ip" "$mac" "$server" "$socks" "$key" "$level" "$user" "$pass" "$use_socks" "$forward_block"
+  if (( forward_count > 0 )); then
+    ok "Configured ${forward_count} forward rule(s)."
+  fi
+  if [[ "$use_socks" == "yes" ]]; then
+    socks_host="$(extract_host "$socks")"
+    if [[ "$socks_host" == "127.0.0.1" || "$socks_host" == "localhost" ]]; then
+      info "SOCKS5 is local-only on ${socks}. Use 0.0.0.0:port if remote clients must connect."
+    fi
+  fi
+  if (( forward_count > 0 )); then
+    first_listen_host="$(extract_host "$first_forward_listen")"
+    if [[ "$first_listen_host" == "127.0.0.1" || "$first_listen_host" == "localhost" ]]; then
+      info "Forward listen is local-only (example: ${first_forward_listen}). Use 0.0.0.0:port for remote clients."
+    fi
+  fi
   show_iran_test_info "$use_socks" "$socks" "$first_forward_listen" "$first_forward_target" "$first_forward_proto"
 }
 
