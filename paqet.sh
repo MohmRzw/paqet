@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.6"
+SCRIPT_VERSION="1.4.0"
 APP_NAME="paqet"
 SERVICE_NAME="paqet"
 REPO="hanselime/paqet"
@@ -35,6 +35,10 @@ usage() {
 ${APP_NAME} manager script v${SCRIPT_VERSION}
 
 Usage:
+  # Ultra simple (minimal prompts)
+  ${0##*/} setup-outside-easy [PORT] [KEY]
+  ${0##*/} setup-iran-easy [OUTSIDE_ADDR] [KEY] [TARGET_HOST] [PORTS]
+
   # Setup (simple and recommended)
   ${0##*/} setup-outside   # full setup for outside server
   ${0##*/} setup-iran      # full setup for Iran client
@@ -66,12 +70,14 @@ Usage:
 
   # Utilities
   ${0##*/} secret
+  ${0##*/} show-iran-cmd
   ${0##*/} quick-guide
   ${0##*/} menu
 
 Notes:
   - Linux only
   - Must run as root
+  - setup-outside-easy + setup-iran-easy are minimal-input fast setup commands
   - setup-outside + setup-iran are one-shot full setup commands
   - setup-iran can ask and save your forward ports directly
 EOF
@@ -331,6 +337,104 @@ assert_safe_tunnel_port() {
   if reason="$(tunnel_port_safety_reason "$p")"; then
     die "${reason} Use a high non-standard port (example: 9999 or 18080), or set PAQET_ALLOW_RISKY_PORT=yes to override."
   fi
+}
+
+port_in_use() {
+  local p="$1"
+  local proto="${2:-tcp}"
+  exists ss || return 1
+  case "$proto" in
+    tcp)
+      ss -H -lnt "sport = :${p}" 2>/dev/null | grep -q .
+      ;;
+    udp)
+      ss -H -lnu "sport = :${p}" 2>/dev/null | grep -q .
+      ;;
+    both)
+      ss -H -lnt "sport = :${p}" 2>/dev/null | grep -q . && return 0
+      ss -H -lnu "sport = :${p}" 2>/dev/null | grep -q .
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+port_in_use_by_paqet() {
+  local p="$1"
+  local proto="${2:-tcp}"
+  exists ss || return 1
+  case "$proto" in
+    tcp)
+      ss -H -lntp "sport = :${p}" 2>/dev/null | grep -q "paqet"
+      ;;
+    udp)
+      ss -H -lnup "sport = :${p}" 2>/dev/null | grep -q "paqet"
+      ;;
+    both)
+      ss -H -lntp "sport = :${p}" 2>/dev/null | grep -q "paqet" && return 0
+      ss -H -lnup "sport = :${p}" 2>/dev/null | grep -q "paqet"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+confirm_port_or_retry() {
+  local p="$1"
+  local proto="${2:-tcp}"
+  local label="${3:-Port}"
+  if ! port_in_use "$p" "$proto"; then
+    return 0
+  fi
+  if port_in_use_by_paqet "$p" "$proto"; then
+    info "${label}: ${proto^^}/${p} is already used by paqet; keeping it."
+    return 0
+  fi
+  if [[ "${PAQET_ALLOW_PORT_CONFLICT:-no}" == "yes" ]]; then
+    warn "${label}: ${proto^^}/${p} is already in use, but continuing because PAQET_ALLOW_PORT_CONFLICT=yes."
+    return 0
+  fi
+  warn "${label}: ${proto^^}/${p} is already in use by another listener on this server."
+  warn "Choose another port, or set PAQET_ALLOW_PORT_CONFLICT=yes to override."
+  confirm "Use ${proto^^}/${p} anyway?"
+}
+
+assert_port_free_or_override() {
+  local p="$1"
+  local proto="${2:-tcp}"
+  local label="${3:-Port}"
+  if port_in_use "$p" "$proto"; then
+    if port_in_use_by_paqet "$p" "$proto"; then
+      info "${label}: ${proto^^}/${p} is already used by paqet; keeping it."
+      return 0
+    fi
+    if [[ "${PAQET_ALLOW_PORT_CONFLICT:-no}" == "yes" ]]; then
+      warn "${label}: ${proto^^}/${p} is already in use, continuing because PAQET_ALLOW_PORT_CONFLICT=yes."
+      return 0
+    fi
+    die "${label}: ${proto^^}/${p} is already in use by another listener on this server. Choose another port, or set PAQET_ALLOW_PORT_CONFLICT=yes to override."
+  fi
+}
+
+can_use_port_or_skip() {
+  local p="$1"
+  local proto="${2:-tcp}"
+  local label="${3:-Port}"
+  if ! port_in_use "$p" "$proto"; then
+    return 0
+  fi
+  if port_in_use_by_paqet "$p" "$proto"; then
+    info "${label}: ${proto^^}/${p} is already used by paqet; keeping it."
+    return 0
+  fi
+  if [[ "${PAQET_ALLOW_PORT_CONFLICT:-no}" == "yes" ]]; then
+    warn "${label}: ${proto^^}/${p} is in use, but keeping it because PAQET_ALLOW_PORT_CONFLICT=yes."
+    return 0
+  fi
+  warn "${label}: ${proto^^}/${p} is in use. Skipping this rule."
+  return 1
 }
 
 detect_arch() {
@@ -691,8 +795,9 @@ show_outside_next_info() {
   echo "===== Values you need on Iran server ====="
   echo "[COPY TO IRAN] Server Address: ${server_ip}:${port}"
   echo "[COPY TO IRAN] Shared Key: ${key}"
-  echo "Next step on Iran server (no manual file editing needed):"
-  echo "sudo ./paqet.sh setup-iran"
+  echo "Next step on Iran server:"
+  echo "Easy mode: sudo /usr/local/bin/paqet-manager setup-iran-easy \"${server_ip}:${port}\" \"${key}\""
+  echo "Wizard mode: sudo /usr/local/bin/paqet-manager setup-iran"
   echo
 }
 
@@ -714,6 +819,98 @@ show_iran_test_info() {
     echo "Forward target is ${first_target} (${first_proto})"
   fi
   echo
+}
+
+detect_required_network_values() {
+  local role="$1"
+  local iface_var="$2"
+  local ip_var="$3"
+  local mac_var="$4"
+  local iface gw ip mac
+
+  iface="$(auto_iface || true)"
+  [[ -n "$iface" ]] || die "Could not auto-detect network interface on ${role}. Run full setup (setup-outside/setup-iran)."
+
+  ip="$(auto_ipv4 "$iface" || true)"
+  is_valid_ipv4 "$ip" || die "Could not auto-detect valid local IPv4 on ${role}. Run full setup (setup-outside/setup-iran)."
+
+  gw="$(auto_gateway || true)"
+  if [[ -n "$gw" ]]; then
+    mac="$(auto_router_mac "$iface" "$gw" || true)"
+  else
+    mac=""
+  fi
+  is_valid_mac "$mac" || die "Could not auto-detect router MAC on ${role}. Run full setup (setup-outside/setup-iran)."
+
+  printf -v "$iface_var" '%s' "$iface"
+  printf -v "$ip_var" '%s' "$ip"
+  printf -v "$mac_var" '%s' "$mac"
+}
+
+build_forward_block_from_csv() {
+  local bind_ip="$1"
+  local target_host="$2"
+  local proto="$3"
+  local ports_csv="$4"
+  local cleaned entry local_port remote_port listen_addr target_addr seen
+  local -a entries=()
+
+  EASY_FORWARD_BLOCK=""
+  EASY_FORWARD_COUNT=0
+  EASY_FIRST_FORWARD_LISTEN=""
+  EASY_FIRST_FORWARD_TARGET=""
+  EASY_FIRST_FORWARD_PROTO=""
+
+  cleaned="${ports_csv//[[:space:]]/}"
+  [[ -n "$cleaned" ]] || return 1
+
+  IFS=',' read -r -a entries <<< "$cleaned"
+  seen=","
+  for entry in "${entries[@]}"; do
+    [[ -z "$entry" ]] && continue
+
+    if [[ "$entry" == *:* ]]; then
+      local_port="${entry%%:*}"
+      remote_port="${entry##*:}"
+    else
+      local_port="$entry"
+      remote_port="$entry"
+    fi
+
+    if ! is_valid_port "$local_port"; then
+      warn "Skip invalid local port token: ${entry}"
+      continue
+    fi
+    if ! is_valid_port "$remote_port"; then
+      warn "Skip invalid target port token: ${entry}"
+      continue
+    fi
+
+    listen_addr="${bind_ip}:${local_port}"
+    target_addr="${target_host}:${remote_port}"
+    if ! can_use_port_or_skip "$local_port" "$proto" "Forward listen ${listen_addr}"; then
+      continue
+    fi
+    if [[ "$seen" == *",${listen_addr},"* ]]; then
+      warn "Skip duplicate local listen address: ${listen_addr}"
+      continue
+    fi
+
+    if (( EASY_FORWARD_COUNT == 0 )); then
+      EASY_FORWARD_BLOCK+="forward:"$'\n'
+      EASY_FIRST_FORWARD_LISTEN="$listen_addr"
+      EASY_FIRST_FORWARD_TARGET="$target_addr"
+      EASY_FIRST_FORWARD_PROTO="$proto"
+    fi
+
+    EASY_FORWARD_BLOCK+="  - listen: \"$(yaml_escape "$listen_addr")\""$'\n'
+    EASY_FORWARD_BLOCK+="    target: \"$(yaml_escape "$target_addr")\""$'\n'
+    EASY_FORWARD_BLOCK+="    protocol: \"$(yaml_escape "$proto")\""$'\n'
+    seen+="${listen_addr},"
+    EASY_FORWARD_COUNT=$((EASY_FORWARD_COUNT + 1))
+  done
+
+  (( EASY_FORWARD_COUNT > 0 ))
 }
 
 wizard_server() {
@@ -816,6 +1013,9 @@ wizard_server() {
         warn "Choose a high non-standard port (example: 9999 or 18080), or set PAQET_ALLOW_RISKY_PORT=yes to override."
         continue
       fi
+    fi
+    if ! confirm_port_or_retry "$port" "tcp" "Tunnel port"; then
+      continue
     fi
     break
   done
@@ -946,10 +1146,18 @@ wizard_client() {
     else
       socks_expose_default="127.0.0.1:1080"
     fi
-      socks="$(prompt_default "Local SOCKS5 address (example: ${socks_expose_default})" "$socks_expose_default")"
-    while ! is_valid_bind_hostport "$socks" || is_placeholder_value "$socks"; do
-      warn "Invalid local SOCKS5 address. Use bind_ip:port (example: 127.0.0.1:1080 or 0.0.0.0:1080)."
-      socks="$(prompt_default "Local SOCKS5 address (example: ${socks_expose_default})" "$socks")"
+    socks="$(prompt_default "Local SOCKS5 address (example: ${socks_expose_default})" "$socks_expose_default")"
+    while true; do
+      if ! is_valid_bind_hostport "$socks" || is_placeholder_value "$socks"; then
+        warn "Invalid local SOCKS5 address. Use bind_ip:port (example: 127.0.0.1:1080 or 0.0.0.0:1080)."
+        socks="$(prompt_default "Local SOCKS5 address (example: ${socks_expose_default})" "$socks")"
+        continue
+      fi
+      if ! confirm_port_or_retry "$(extract_port "$socks")" "tcp" "SOCKS listen port"; then
+        socks="$(prompt_default "Local SOCKS5 address (example: ${socks_expose_default})" "$socks")"
+        continue
+      fi
+      break
     done
     if confirm "Enable username/password for local SOCKS5?"; then
       user="$(prompt_default "Username (example: myuser)" "")"
@@ -1045,6 +1253,9 @@ wizard_client() {
 
           listen_addr="${bulk_listen_ip}:${local_port}"
           target_addr="${bulk_target_host}:${remote_port}"
+          if ! can_use_port_or_skip "$local_port" "$bulk_proto" "Forward listen ${listen_addr}"; then
+            continue
+          fi
           if [[ "$seen_listens" == *",${listen_addr},"* ]]; then
             warn "Skip duplicate local listen address: ${listen_addr}"
             continue
@@ -1105,6 +1316,10 @@ wizard_client() {
           proto="$(prompt_default "Protocol (example: tcp)" "tcp")"
           proto="${proto,,}"
         done
+
+        if ! confirm_port_or_retry "$(extract_port "$listen")" "$proto" "Forward listen ${listen}"; then
+          continue
+        fi
 
         if (( forward_count == 0 )); then
           forward_block+="forward:"$'\n'
@@ -1251,6 +1466,68 @@ server_port_from_config() {
   extract_port "$addr"
 }
 
+server_ipv4_from_config() {
+  [[ -f "$CONFIG_PATH" ]] || return 1
+  local addr
+  addr="$(awk '
+    /^[[:space:]]*ipv4:[[:space:]]*$/ {in_ipv4=1; next}
+    in_ipv4 && /^[[:space:]]*addr:[[:space:]]*/ {
+      line=$0
+      sub(/^[[:space:]]*addr:[[:space:]]*/, "", line)
+      sub(/[[:space:]]+#.*$/, "", line)
+      gsub(/"/, "", line)
+      print line
+      exit
+    }
+    in_ipv4 && /^[^[:space:]]/ {in_ipv4=0}
+  ' "$CONFIG_PATH" || true)"
+  [[ -n "$addr" ]] || return 1
+  extract_host "$addr"
+}
+
+shared_key_from_config() {
+  [[ -f "$CONFIG_PATH" ]] || return 1
+  local k
+  k="$(awk '
+    /^[[:space:]]*kcp:[[:space:]]*$/ {in_kcp=1; next}
+    in_kcp && /^[[:space:]]*key:[[:space:]]*/ {
+      line=$0
+      sub(/^[[:space:]]*key:[[:space:]]*/, "", line)
+      sub(/[[:space:]]+#.*$/, "", line)
+      gsub(/"/, "", line)
+      print line
+      exit
+    }
+    in_kcp && /^[^[:space:]]/ {in_kcp=0}
+  ' "$CONFIG_PATH" || true)"
+  [[ -n "$k" ]] || return 1
+  printf '%s' "$k"
+}
+
+show_iran_easy_command() {
+  [[ -f "$CONFIG_PATH" ]] || die "Config missing: ${CONFIG_PATH}"
+  local role server_ip server_port key
+  role="$(cat "$ROLE_PATH" 2>/dev/null || true)"
+  [[ "$role" == "server" ]] || die "Current node is not configured as outside server."
+
+  server_port="$(server_port_from_config || true)"
+  is_valid_port "$server_port" || die "Could not detect outside server port from config."
+
+  key="$(shared_key_from_config || true)"
+  [[ -n "$key" ]] || die "Could not detect Shared Key from config."
+
+  server_ip="$(public_ipv4)"
+  if [[ -z "$server_ip" ]]; then
+    server_ip="$(server_ipv4_from_config || true)"
+  fi
+  [[ -n "$server_ip" ]] || die "Could not detect outside server IP."
+
+  echo
+  echo "Run this on Iran server:"
+  echo "curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- iran-easy --server ${server_ip}:${server_port} --key ${key}"
+  echo
+}
+
 resolve_server_port() {
   local p="${1:-}"
   if [[ -z "$p" ]]; then
@@ -1365,6 +1642,146 @@ edit_config() {
   "$ed" "$CONFIG_PATH"
 }
 
+quick_setup_server_easy() {
+  local iface ip mac port key level public_ip server_addr
+  echo
+  echo "===== Easy setup: Outside server ====="
+  echo "This mode uses auto-detect + safe defaults."
+  echo "Step 1: install binary"
+  install_binary
+
+  detect_required_network_values "outside server" iface ip mac
+
+  port="${1:-${PAQET_EASY_TUNNEL_PORT:-${PAQET_TUNNEL_PORT:-9999}}}"
+  is_valid_port "$port" || die "Invalid tunnel port for easy mode: ${port}"
+  assert_safe_tunnel_port "$port"
+  assert_port_free_or_override "$port" "tcp" "Tunnel port"
+
+  key="${2:-${PAQET_SHARED_KEY:-}}"
+  if [[ -z "$key" ]]; then
+    key="$(generate_secret)"
+  fi
+  [[ -n "$key" ]] || die "Could not generate/read Shared Key."
+  is_placeholder_value "$key" && die "Shared Key looks like placeholder. Provide a real key."
+
+  level="${PAQET_EASY_LOG_LEVEL:-info}"
+
+  echo "Step 2: write outside config"
+  write_server_config "$iface" "$ip" "$mac" "$port" "$key" "$level"
+  echo "Step 3: create system service"
+  create_service
+  echo "Step 4: apply required network rules"
+  firewall_apply "$port"
+  firewall_save
+  echo "Step 5: start service"
+  service_restart_or_start
+  ok "Outside server easy setup completed."
+
+  show_outside_next_info "$ip" "$port" "$key"
+  public_ip="$(public_ipv4)"
+  if [[ -n "$public_ip" ]]; then
+    server_addr="${public_ip}:${port}"
+  else
+    server_addr="${ip}:${port}"
+  fi
+  echo "Fast command for Iran server:"
+  echo "sudo /usr/local/bin/paqet-manager setup-iran-easy \"${server_addr}\" \"${key}\""
+  echo
+}
+
+quick_setup_client_easy() {
+  local iface ip mac server key target_host ports_csv bind_ip proto level
+  local socks_enable socks_addr socks_user socks_pass use_socks
+  local forward_block
+  echo
+  echo "===== Easy setup: Iran server ====="
+  echo "This mode asks only required values and auto-fills the rest."
+  echo "Step 1: install binary"
+  install_binary
+
+  server="${1:-${PAQET_OUTSIDE_ADDR:-}}"
+  if [[ -z "$server" ]]; then
+    server="$(prompt_default "[REQUIRED] Outside server address (example: 203.0.113.10:9999)" "")"
+  fi
+  while [[ -z "$server" ]] || ! is_valid_hostport "$server" || is_placeholder_value "$server"; do
+    warn "Invalid outside server address. Example: 203.0.113.10:9999"
+    server="$(prompt_default "[REQUIRED] Outside server address (example: 203.0.113.10:9999)" "$server")"
+  done
+
+  key="${2:-${PAQET_SHARED_KEY:-}}"
+  if [[ -z "$key" ]]; then
+    key="$(prompt_default "[REQUIRED] Shared Key (same as outside server)" "")"
+  fi
+  while [[ -z "$key" ]] || is_placeholder_value "$key"; do
+    warn "Enter the real Shared Key from outside server."
+    key="$(prompt_default "[REQUIRED] Shared Key (same as outside server)" "$key")"
+  done
+
+  target_host="${3:-${PAQET_EASY_FORWARD_TARGET:-}}"
+  if [[ -z "$target_host" ]]; then
+    target_host="$(extract_host "$server")"
+  fi
+  is_valid_host "$target_host" || die "Invalid target host for easy mode: ${target_host}"
+  is_placeholder_value "$target_host" && die "Target host looks like placeholder."
+
+  ports_csv="${4:-${PAQET_EASY_FORWARD_PORTS:-443,8443}}"
+  bind_ip="${PAQET_EASY_FORWARD_BIND_IP:-0.0.0.0}"
+  proto="${PAQET_EASY_FORWARD_PROTOCOL:-tcp}"
+  proto="${proto,,}"
+  [[ "$proto" == "tcp" || "$proto" == "udp" ]] || die "PAQET_EASY_FORWARD_PROTOCOL must be tcp or udp."
+  is_valid_bind_host "$bind_ip" || die "Invalid PAQET_EASY_FORWARD_BIND_IP: ${bind_ip}"
+
+  socks_enable="${PAQET_EASY_SOCKS_ENABLE:-yes}"
+  socks_enable="${socks_enable,,}"
+  socks_addr="${PAQET_EASY_SOCKS_ADDR:-0.0.0.0:1080}"
+  socks_user="${PAQET_EASY_SOCKS_USER:-}"
+  socks_pass="${PAQET_EASY_SOCKS_PASS:-}"
+  use_socks="no"
+  if [[ "$socks_enable" == "yes" || "$socks_enable" == "true" || "$socks_enable" == "1" ]]; then
+    is_valid_bind_hostport "$socks_addr" || die "Invalid PAQET_EASY_SOCKS_ADDR: ${socks_addr}"
+    use_socks="yes"
+    assert_port_free_or_override "$(extract_port "$socks_addr")" "tcp" "SOCKS listen port"
+    if [[ -n "$socks_user" || -n "$socks_pass" ]]; then
+      [[ -n "$socks_user" && -n "$socks_pass" ]] || die "Set both PAQET_EASY_SOCKS_USER and PAQET_EASY_SOCKS_PASS."
+    fi
+    if [[ "$(extract_host "$socks_addr")" == "0.0.0.0" && -z "$socks_user" && -z "$socks_pass" ]]; then
+      warn "SOCKS is exposed on ${socks_addr} without auth. Set PAQET_EASY_SOCKS_USER/PAQET_EASY_SOCKS_PASS if this is public."
+    fi
+  else
+    socks_addr="127.0.0.1:1080"
+    socks_user=""
+    socks_pass=""
+  fi
+
+  detect_required_network_values "Iran server" iface ip mac
+
+  forward_block=""
+  if build_forward_block_from_csv "$bind_ip" "$target_host" "$proto" "$ports_csv"; then
+    forward_block="$EASY_FORWARD_BLOCK"
+  elif [[ -n "${ports_csv//[[:space:]]/}" ]]; then
+    die "No valid forward ports parsed from: ${ports_csv}"
+  fi
+
+  if [[ "$use_socks" == "no" && "${EASY_FORWARD_COUNT:-0}" -eq 0 ]]; then
+    die "Easy mode has no SOCKS and no valid forward rule. Set PAQET_EASY_SOCKS_ENABLE=yes or provide valid ports."
+  fi
+
+  level="${PAQET_EASY_LOG_LEVEL:-info}"
+
+  echo "Step 2: write Iran config"
+  write_client_config "$iface" "$ip" "$mac" "$server" "$socks_addr" "$key" "$level" "$socks_user" "$socks_pass" "$use_socks" "$forward_block"
+  echo "Step 3: create system service"
+  create_service
+  echo "Step 4: start service"
+  service_restart_or_start
+  ok "Iran server easy setup completed."
+
+  if (( ${EASY_FORWARD_COUNT:-0} > 0 )); then
+    ok "Configured ${EASY_FORWARD_COUNT} forward rule(s): ${ports_csv//[[:space:]]/}"
+  fi
+  show_iran_test_info "$use_socks" "$socks_addr" "${EASY_FIRST_FORWARD_LISTEN:-}" "${EASY_FIRST_FORWARD_TARGET:-}" "${EASY_FIRST_FORWARD_PROTO:-}"
+}
+
 quick_setup_server() {
   echo
   echo "===== Full setup: Outside server ====="
@@ -1447,6 +1864,9 @@ menu_config() {
 7) Save network rules
 8) Show interfaces
 9) Generate Shared Key
+10) Easy setup outside (auto/minimal)
+11) Easy setup Iran (minimal)
+12) Show Iran easy command (from current outside config)
 0) Back
 EOF
     local n
@@ -1461,6 +1881,9 @@ EOF
       7) firewall_save || true ;;
       8) run_iface || true ;;
       9) show_secret || true ;;
+      10) quick_setup_server_easy || true ;;
+      11) quick_setup_client_easy || true ;;
+      12) show_iran_easy_command || true ;;
       0) break ;;
       *) warn "Invalid option." ;;
     esac
@@ -1530,18 +1953,22 @@ show_quick_guide() {
 Important: all examples are placeholders. Replace with your real values.
 Do not type: x.x.x.x, aa:bb:cc:dd:ee:ff, example.com, your-domain.com
 
-1) Run this on outside server:
-   sudo ./paqet.sh setup-outside
+1) Fast mode (minimal):
+   On outside server:
+   sudo /usr/local/bin/paqet-manager setup-outside-easy
 
-2) Keep these values from output:
+2) Copy these values from output:
    Server Address and Shared Key
+   (or later run: sudo /usr/local/bin/paqet-manager show-iran-cmd)
 
-3) Run this on Iran server:
-   sudo ./paqet.sh setup-iran
-   Enter the same Server Address and Shared Key from step 2.
-   In the same setup, add your direct tunnel ports (forward rules).
+3) On Iran server (fast mode):
+   sudo /usr/local/bin/paqet-manager setup-iran-easy "SERVER:PORT" "SHARED_KEY"
 
-4) Test on Iran server:
+4) Default easy forward ports are 443,8443 and SOCKS is 0.0.0.0:1080.
+   Customize with env vars if needed:
+   PAQET_EASY_FORWARD_PORTS, PAQET_EASY_FORWARD_BIND_IP, PAQET_EASY_SOCKS_ADDR
+
+5) Test on Iran server:
    curl -v https://httpbin.org/ip --proxy socks5h://127.0.0.1:1080
 EOF
 }
@@ -1581,6 +2008,8 @@ main() {
   require_root
 
   case "$cmd" in
+    setup-outside-easy|easy-outside) quick_setup_server_easy "${2:-}" "${3:-}" ;;
+    setup-iran-easy|easy-iran) quick_setup_client_easy "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
     setup-outside|setup-server) quick_setup_server ;;
     setup-iran|setup-client) quick_setup_client ;;
     install|update) install_binary ;;
@@ -1599,6 +2028,7 @@ main() {
     ping) run_ping ;;
     iface) run_iface ;;
     secret) show_secret ;;
+    show-iran-cmd) show_iran_easy_command ;;
     backup-config) backup_config ;;
     quick-guide) show_quick_guide ;;
     edit-config) edit_config ;;
