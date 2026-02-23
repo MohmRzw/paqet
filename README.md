@@ -14,6 +14,25 @@ curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sud
 2. `Server Address` و `Shared Key` را بردار.
 3. بعد روی سرور ایران نصب و کانفیگ انجام بده.
 
+## خیلی مهم: هر IP را کجا وارد کنم؟
+
+1. در تنظیم **خارج**:
+   - `Local IPv4 of this outside server` = آی‌پی خود سرور خارج
+   - آی‌پی ایران اینجا وارد نمی‌شود.
+
+2. در تنظیم **ایران**:
+   - `[REQUIRED] Outside server address` = آی‌پی/دامنه سرور خارج + پورت تونل  
+     مثال: `5.75.197.42:9999`
+   - `Local IPv4 of this Iran server` = آی‌پی خود سرور ایران
+
+3. در بخش فوروارد روی ایران:
+   - `Bulk target host/domain` یا `Target via tunnel` = مقصد سرویس
+   - در سناریوی رایج شما: همان آی‌پی سرور خارج (مثلا `5.75.197.42`)
+
+4. خلاصه خیلی کوتاه:
+   - آی‌پی خارج را روی ایران وارد کن.
+   - آی‌پی ایران را فقط به عنوان Local IPv4 خودش وارد کن.
+
 ---
 
 ## سوالات نصب (English Guide)
