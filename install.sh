@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="1.1.0"
+INSTALLER_VERSION="1.2.0"
 DEFAULT_REPO="MohmRzw/paqet"
 DEFAULT_BRANCH="main"
 DEFAULT_INSTALL_PATH="/usr/local/bin/paqet-manager"
@@ -16,25 +16,35 @@ usage() {
 PAQET bootstrap installer
 
 Usage:
-  install.sh [outside|iran|menu]
-  install.sh --repo <github_user/repo> [outside|iran|menu]
+  install.sh [outside-easy|iran-easy|outside|iran|menu]
+  install.sh --repo <github_user/repo> [outside-easy|iran-easy|outside|iran|menu]
 
 Options:
   --repo <value>       Optional. Default: MohmRzw/paqet
   --branch <value>     Optional. Default: main
-  --mode <value>       outside | iran | menu
+  --mode <value>       outside-easy | iran-easy | outside | iran | menu
+  --server <addr>      For iran-easy. Example: 203.0.113.10:9999
+  --key <value>        For iran-easy. Shared Key from outside setup
+  --target <host>      For iran-easy. Forward target host (default: host part of --server)
+  --ports <csv>        For iran-easy. Default: 443,8443
   --install-path <p>   Optional install path. Default: /usr/local/bin/paqet-manager
   --no-run             Install only, do not run setup after install
   -h, --help           Show help
 
 Examples:
-  # Easiest (asks mode: outside / iran / menu)
+  # Easiest (asks mode, defaults to outside-easy)
   curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash
 
-  # Direct mode (outside)
+  # One-line easy outside
+  curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- outside-easy
+
+  # One-line easy Iran
+  curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- iran-easy --server 5.75.197.42:9999 --key YOUR_KEY
+
+  # Full wizard mode (outside)
   curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- outside
 
-  # Direct mode (iran)
+  # Full wizard mode (iran)
   curl -fsSL https://raw.githubusercontent.com/MohmRzw/paqet/main/install.sh | sudo bash -s -- iran
 EOF
 }
@@ -72,44 +82,53 @@ select_mode_if_needed() {
   cat <<'EOF'
 
 Choose install mode:
-1) outside
-2) iran
-3) menu
+1) outside-easy (recommended)
+2) iran-easy (recommended)
+3) outside (full wizard)
+4) iran (full wizard)
+5) menu
 EOF
 
-  if ans="$(read_prompt_line "Select [3]: ")"; then
+  if ans="$(read_prompt_line "Select [1]: ")"; then
     :
   else
     ans=""
   fi
 
-  case "${ans:-3}" in
-    1|outside) MODE="outside" ;;
-    2|iran) MODE="iran" ;;
-    3|menu|"") MODE="menu" ;;
-    *) MODE="menu" ;;
+  case "${ans:-1}" in
+    1|outside-easy) MODE="outside-easy" ;;
+    2|iran-easy) MODE="iran-easy" ;;
+    3|outside) MODE="outside" ;;
+    4|iran) MODE="iran" ;;
+    5|menu|"") MODE="menu" ;;
+    *) MODE="outside-easy" ;;
   esac
 }
 
 run_installed_manager() {
   local mode="$1"
+  shift
   if [[ -t 0 ]]; then
-    "$INSTALL_PATH" "$mode"
+    "$INSTALL_PATH" "$mode" "$@"
     return
   fi
   if [[ -r /dev/tty ]]; then
-    "$INSTALL_PATH" "$mode" < /dev/tty
+    "$INSTALL_PATH" "$mode" "$@" < /dev/tty
     return
   fi
-  die "No interactive TTY available for mode '${mode}'. Re-run with --no-run, then execute: $INSTALL_PATH $mode"
+  "$INSTALL_PATH" "$mode" "$@"
 }
 
 REPO="${GITHUB_REPO:-$DEFAULT_REPO}"
 BRANCH="${GITHUB_BRANCH:-$DEFAULT_BRANCH}"
-MODE="menu"
+MODE="outside-easy"
 MODE_SET_BY_USER="no"
 INSTALL_PATH="${INSTALL_PATH:-$DEFAULT_INSTALL_PATH}"
 AUTO_RUN="yes"
+IRAN_SERVER_ADDR="${PAQET_OUTSIDE_ADDR:-}"
+IRAN_SHARED_KEY="${PAQET_SHARED_KEY:-}"
+IRAN_TARGET_HOST="${PAQET_EASY_FORWARD_TARGET:-}"
+IRAN_PORTS="${PAQET_EASY_FORWARD_PORTS:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -129,6 +148,26 @@ while [[ $# -gt 0 ]]; do
       MODE_SET_BY_USER="yes"
       shift 2
       ;;
+    --server)
+      [[ $# -gt 1 ]] || die "--server requires a value"
+      IRAN_SERVER_ADDR="$2"
+      shift 2
+      ;;
+    --key)
+      [[ $# -gt 1 ]] || die "--key requires a value"
+      IRAN_SHARED_KEY="$2"
+      shift 2
+      ;;
+    --target)
+      [[ $# -gt 1 ]] || die "--target requires a value"
+      IRAN_TARGET_HOST="$2"
+      shift 2
+      ;;
+    --ports)
+      [[ $# -gt 1 ]] || die "--ports requires a value"
+      IRAN_PORTS="$2"
+      shift 2
+      ;;
     --install-path)
       [[ $# -gt 1 ]] || die "--install-path requires a value"
       INSTALL_PATH="$2"
@@ -136,6 +175,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-run)
       AUTO_RUN="no"
+      shift
+      ;;
+    outside-easy|setup-outside-easy)
+      MODE="outside-easy"
+      MODE_SET_BY_USER="yes"
+      shift
+      ;;
+    iran-easy|setup-iran-easy)
+      MODE="iran-easy"
+      MODE_SET_BY_USER="yes"
       shift
       ;;
     outside|setup-outside)
@@ -170,8 +219,8 @@ done
 select_mode_if_needed
 
 case "$MODE" in
-  outside|iran|menu) ;;
-  *) die "Invalid mode: $MODE (use outside|iran|menu)" ;;
+  outside-easy|iran-easy|outside|iran|menu) ;;
+  *) die "Invalid mode: $MODE (use outside-easy|iran-easy|outside|iran|menu)" ;;
 esac
 
 require_root
@@ -206,11 +255,27 @@ ok "Saved binary source: /etc/paqet/source.env"
 
 if [[ "$AUTO_RUN" == "no" ]]; then
   log "Install only mode completed."
-  log "Run manually: $INSTALL_PATH setup-outside | setup-iran | menu"
+  log "Run manually: $INSTALL_PATH setup-outside-easy | setup-iran-easy | setup-outside | setup-iran | menu"
   exit 0
 fi
 
 case "$MODE" in
+  outside-easy)
+    log "Running easy setup for outside server..."
+    run_installed_manager setup-outside-easy
+    ;;
+  iran-easy)
+    log "Running easy setup for Iran server..."
+    if [[ -n "$IRAN_PORTS" ]]; then
+      run_installed_manager setup-iran-easy "$IRAN_SERVER_ADDR" "$IRAN_SHARED_KEY" "$IRAN_TARGET_HOST" "$IRAN_PORTS"
+    elif [[ -n "$IRAN_TARGET_HOST" ]]; then
+      run_installed_manager setup-iran-easy "$IRAN_SERVER_ADDR" "$IRAN_SHARED_KEY" "$IRAN_TARGET_HOST"
+    elif [[ -n "$IRAN_SHARED_KEY" || -n "$IRAN_SERVER_ADDR" ]]; then
+      run_installed_manager setup-iran-easy "$IRAN_SERVER_ADDR" "$IRAN_SHARED_KEY"
+    else
+      run_installed_manager setup-iran-easy
+    fi
+    ;;
   outside)
     log "Running full setup for outside server..."
     run_installed_manager setup-outside
